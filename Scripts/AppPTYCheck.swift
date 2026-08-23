@@ -29,7 +29,19 @@ enum SessionStatus: Equatable {
 @main
 enum AppPTYCheck {
     @MainActor
-    static func main() async throws {
+    static func main() async {
+        do {
+            try await run()
+        } catch {
+            let message = "app-pty-check failed: \(error.localizedDescription)"
+            print("::error::\(message)")
+            fputs(message + "\n", stderr)
+            exit(1)
+        }
+    }
+
+    @MainActor
+    private static func run() async throws {
         let session = TerminalSession(kind: .local)
         session.resize(columns: 100, rows: 24)
         session.start()
