@@ -95,7 +95,7 @@ private struct WindowConfigurationView: NSViewRepresentable {
     let displayMode: AppDisplayMode
 
     func makeNSView(context: Context) -> WindowConfigurationNSView {
-        WindowConfigurationNSView(alwaysOnTop: alwaysOnTop, displayMode: displayMode)
+        return WindowConfigurationNSView(alwaysOnTop: alwaysOnTop, displayMode: displayMode)
     }
 
     func updateNSView(_ nsView: WindowConfigurationNSView, context: Context) {
@@ -110,6 +110,10 @@ private final class WindowConfigurationNSView: NSView {
     private var frameObservers: [NSObjectProtocol] = []
     private var hasRestoredFrame = false
     private var restoreScheduled = false
+    private var titlebarMouseMonitor: Any?
+    private var isDraggingWindow = false
+    private var dragStartMouseLocation = NSPoint.zero
+    private var dragStartWindowOrigin = NSPoint.zero
 
     init(alwaysOnTop: Bool, displayMode: AppDisplayMode) {
         self.alwaysOnTop = alwaysOnTop
@@ -126,6 +130,7 @@ private final class WindowConfigurationNSView: NSView {
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         removeFrameObservers()
+        removeTitlebarMouseMonitor()
         configureWindow(alwaysOnTop: alwaysOnTop, displayMode: displayMode)
         installFrameObservers()
         scheduleFrameRestore()
@@ -139,14 +144,110 @@ private final class WindowConfigurationNSView: NSView {
         window.backgroundColor = .clear
         window.level = alwaysOnTop ? .floating : .normal
         window.toolbarStyle = displayMode == .compact ? .unifiedCompact : .automatic
-        // The compact toolbar can consume the normal titlebar drag region. Let
-        // AppKit fall back to the window background so the window remains movable.
-        window.isMovableByWindowBackground = displayMode == .compact
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .visible
         window.contentView?.wantsLayer = true
         window.contentView?.layer?.backgroundColor = NSColor.clear.cgColor
+        if displayMode == .compact {
+            installTitlebarMouseMonitor(for: window)
+        } else {
+            removeTitlebarMouseMonitor()
+        }
         scheduleFrameRestore()
+    }
+
+    private func installTitlebarMouseMonitor(for window: NSWindow) {
+        guard titlebarMouseMonitor == nil else { return }
+
+        let eventMask = NSEvent.EventTypeMask.leftMouseDown
+            .union(.leftMouseDragged)
+            .union(.leftMouseUp)
+        titlebarMouseMonitor = NSEvent.addLocalMonitorForEvents(matching: eventMask) { [weak self, weak window] event in
+            guard let self, let window, self.displayMode == .compact else {
+                return event
+            }
+
+            if self.isDraggingWindow {
+                switch event.type {
+                case .leftMouseDragged:
+                    self.updateWindowDrag(with: event, in: window)
+                    return nil
+                case .leftMouseUp:
+                    self.isDraggingWindow = false
+                    return nil
+                default:
+                    return event
+                }
+            }
+
+            guard event.type == .leftMouseDown,
+                  event.window === window,
+                  self.isTitlebarEvent(event, in: window),
+                  !self.isInteractiveTitlebarControl(at: event.locationInWindow, in: window) else {
+                return event
+            }
+
+            self.beginWindowDrag(with: event, in: window)
+            return nil
+        }
+    }
+
+    private func removeTitlebarMouseMonitor() {
+        isDraggingWindow = false
+        guard let titlebarMouseMonitor else { return }
+        NSEvent.removeMonitor(titlebarMouseMonitor)
+        self.titlebarMouseMonitor = nil
+    }
+
+    private func isTitlebarEvent(_ event: NSEvent, in window: NSWindow) -> Bool {
+        let contentTop = window.contentLayoutRect.maxY
+        let point = event.locationInWindow
+        let frame = window.frame
+        let isNearResizeEdge = point.x <= 6 || point.x >= frame.width - 6 || point.y >= frame.height - 6
+        return point.y >= contentTop && !isNearResizeEdge
+    }
+
+    private func beginWindowDrag(with event: NSEvent, in window: NSWindow) {
+        isDraggingWindow = true
+        dragStartMouseLocation = window.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+        dragStartWindowOrigin = window.frame.origin
+    }
+
+    private func updateWindowDrag(with event: NSEvent, in window: NSWindow) {
+        let mouseLocation = window.convertToScreen(NSRect(origin: event.locationInWindow, size: .zero)).origin
+        let delta = NSPoint(
+            x: mouseLocation.x - dragStartMouseLocation.x,
+            y: mouseLocation.y - dragStartMouseLocation.y
+        )
+        window.setFrameOrigin(NSPoint(
+            x: dragStartWindowOrigin.x + delta.x,
+            y: dragStartWindowOrigin.y + delta.y
+        ))
+    }
+
+    private func isInteractiveTitlebarControl(at point: NSPoint, in window: NSWindow) -> Bool {
+        for buttonType in [
+            NSWindow.ButtonType.closeButton,
+            .miniaturizeButton,
+            .zoomButton,
+            .documentIconButton,
+            .documentVersionsButton
+        ] {
+            guard let button = window.standardWindowButton(buttonType) else { continue }
+            let buttonFrame = button.convert(button.bounds, to: nil)
+            if buttonFrame.contains(point) { return true }
+        }
+
+        guard let frameView = window.contentView?.superview else { return false }
+        let framePoint = frameView.convert(point, from: nil)
+        var view = frameView.hitTest(framePoint)
+        while let current = view {
+            if current is NSControl || String(describing: type(of: current)).contains("Hosting") {
+                return true
+            }
+            view = current.superview
+        }
+        return false
     }
 
     private func installFrameObservers() {
