@@ -1,0 +1,88 @@
+# MatTerm
+
+> 使用 Swift 构建的原生 macOS 终端与 SSH 工作区。
+
+[English](README.md)
+
+MatTerm 面向需要频繁使用本地终端和 SSH 的 macOS 用户。它使用原生 SwiftUI 和 AppKit 界面、系统 PTY 以及系统 OpenSSH 客户端，保持响应流畅、资源占用较低，并与 macOS 的窗口和输入体系保持一致。
+
+## 功能
+
+- 基于真实 PTY 的本地终端会话。
+- 从 `~/.ssh/config` 导入并同步 SSH 配置。
+- 在 App 中新增或编辑的配置会写回本机 OpenSSH 配置文件。
+- 支持 ANSI 颜色、256 色和 24 位真彩色渲染。
+- 内置 Tabby 社区配色方案。
+- 支持设置字体、字号、额外行间距、光标闪烁、背景透明度和模糊程度。
+- 支持传统标签栏和紧凑标签栏。
+- 支持在设置中修改 SSH 配置选择器和分屏快捷键。
+- 支持向左、向右、向上、向下分屏，每个子终端独立聚焦并独立显示光标。
+- 记忆窗口大小和位置，支持窗口置顶以及全局显示/隐藏快捷键。
+- 支持英文和简体中文界面。
+
+首个发布版本暂不包含端口转发；分屏目前采用方向性子窗口工作流。
+
+## 系统要求
+
+- macOS 26.0 或更高版本。
+- 从源码构建需要 Swift 6.1 或更高版本，以及 macOS 26 SDK。
+- 发布 App 同时包含 `arm64` 和 `x86_64` 两种架构。
+
+## 构建和运行
+
+```sh
+git clone <repository-url>
+cd MatTerm
+./Scripts/build-app.sh
+./Scripts/validate-app.sh
+./Scripts/package-app.sh
+open Build/MatTerm.app
+```
+
+构建脚本会先执行终端解析、PTY、性能、外观和 App 级检查，分别编译两种 CPU 架构，生成标准 macOS 图标，并对 `Build/MatTerm.app` 进行临时签名。`Scripts/package-app.sh` 会在 `Artifacts/` 中生成 universal ZIP。
+
+GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.1.0` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
+
+如果只需要编译：
+
+```sh
+swift build -c release
+```
+
+MatTerm 当前面向个人使用和源码分发，不包含 Mac App Store 上架配置。
+
+### 安装 GitHub 构建版本
+
+对于 GitHub Actions 工件或 Release ZIP：
+
+1. 下载并解压 ZIP。
+2. 将 `MatTerm.app` 移动到 `/Applications`。
+3. 第一次启动时按住 Control 点击 App，选择 **打开**，然后确认 **打开**。
+
+默认 workflow 使用临时签名，因为仓库中不保存 Apple Developer 凭据。如果配置文档中列出的 GitHub Actions Secrets，生产 workflow 可以执行 Developer ID 签名和公证。没有公证时，Gatekeeper 可能要求第一次启动进行上述确认。App 本身是 universal，在 Apple Silicon Mac 上不需要 Rosetta。
+
+## SSH 配置
+
+MatTerm 使用系统 OpenSSH 客户端 `/usr/bin/ssh`。
+
+- App 启动时会读取最新的 `~/.ssh/config`。
+- 打开 SSH 配置选择器时，会在显示选择器前重新读取该文件。
+- 保存配置时会更新匹配的 `Host` 块；找不到时会追加新的配置块。
+- 更新配置时会保留无法由配置编辑器表示的选项以及其他无关的 `Host` 块。
+- 身份验证仍由 OpenSSH、SSH Agent 和用户选择的身份文件负责，MatTerm 不保存密码。
+
+如果已有 `Host` 块包含配置编辑器没有覆盖的高级选项，建议在使用其他 SSH 工具之前检查写回后的 `~/.ssh/config`。
+
+## 项目结构
+
+```text
+Sources/MatTerm/      应用和终端实现
+Resources/             Info.plist 和图标源文件
+Scripts/               构建和运行检查脚本
+Build/                 本机构建输出，已加入 Git 忽略
+Artifacts/             本地发布压缩包，已加入 Git 忽略
+```
+
+## 许可证
+
+目前还没有选择许可证。如果要公开仓库并接受外部贡献，请在发布前补充许可证。

@@ -1,0 +1,31 @@
+# macOS metadata
+.DS_Store
+
+# Swift Package Manager and local build output
+.build/
+.swiftpm/
+Build/
+Artifacts/
+DerivedData/
+
+# Xcode user-specific files
+xcuserdata/
+*.xcuserstate
+
+# Local editor and temporary files
+.idea/
+.vscode/
+*.swp
+*.swo
+*.tmp
+*.log
+
+# Local signing and environment files
+.env
+*.p12
+*.mobileprovision
+*.provisionprofile
+
+# Release archives
+*.dmg
+*.zip

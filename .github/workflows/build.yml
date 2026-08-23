@@ -1,0 +1,61 @@
+name: Build MatTerm
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*.*.*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    env:
+      APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Show toolchain
+        run: |
+          sw_vers
+          swift --version
+          xcrun --sdk macosx --show-sdk-version
+
+      - name: Build and run checks
+        run: ./Scripts/build-app.sh
+
+      - name: Validate universal app
+        run: ./Scripts/validate-app.sh
+
+      - name: Sign and notarize release
+        if: ${{ env.APPLE_CERTIFICATE_P12_BASE64 != '' && env.APPLE_CERTIFICATE_PASSWORD != '' && env.APPLE_SIGNING_IDENTITY != '' && env.APPLE_ID != '' && env.APPLE_TEAM_ID != '' && env.APPLE_APP_PASSWORD != '' }}
+        run: ./Scripts/sign-and-notarize.sh
+
+      - name: Package ad-hoc build
+        if: ${{ env.APPLE_CERTIFICATE_P12_BASE64 == '' || env.APPLE_CERTIFICATE_PASSWORD == '' || env.APPLE_SIGNING_IDENTITY == '' || env.APPLE_ID == '' || env.APPLE_TEAM_ID == '' || env.APPLE_APP_PASSWORD == '' }}
+        run: ./Scripts/package-app.sh
+
+      - name: Validate final app
+        run: ./Scripts/validate-app.sh
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MatTerm-macos26-universal
+          path: Artifacts/*.zip
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" Artifacts/*.zip --repo "$GITHUB_REPOSITORY" --generate-notes
