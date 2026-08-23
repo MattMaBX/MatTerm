@@ -30,7 +30,24 @@ jobs:
           swift --version
           xcrun --sdk macosx --show-sdk-version
 
-      - name: Check terminal pipeline
+      - name: Check terminal parser
+        env:
+          MATTERM_TERMINAL_PHASE: parser
+        run: ./Scripts/check-terminal.sh
+
+      - name: Check PTY pipeline
+        env:
+          MATTERM_TERMINAL_PHASE: pty
+        run: ./Scripts/check-terminal.sh
+
+      - name: Check terminal performance
+        env:
+          MATTERM_TERMINAL_PHASE: performance
+        run: ./Scripts/check-terminal.sh
+
+      - name: Check app PTY session
+        env:
+          MATTERM_TERMINAL_PHASE: app-pty
         run: ./Scripts/check-terminal.sh
 
       - name: Check appearance fallback
