@@ -85,4 +85,4 @@ Artifacts/             Local release archives, ignored by Git
 
 ## License
 
-No license has been selected yet. Add a license before publishing the repository for external contributions.
+MatTerm is released under the [MIT License](LICENSE).
