@@ -65,10 +65,22 @@ jobs:
           MATTERM_BUILD_PHASE: x86_64
         run: ./Scripts/build-app.sh
 
-      - name: Assemble universal app
+      - name: Merge universal binary
         env:
           MATTERM_SKIP_CHECKS: "1"
-          MATTERM_BUILD_PHASE: assemble
+          MATTERM_BUILD_PHASE: merge
+        run: ./Scripts/build-app.sh
+
+      - name: Generate app icon
+        env:
+          MATTERM_SKIP_CHECKS: "1"
+          MATTERM_BUILD_PHASE: icon
+        run: ./Scripts/build-app.sh
+
+      - name: Sign app bundle
+        env:
+          MATTERM_SKIP_CHECKS: "1"
+          MATTERM_BUILD_PHASE: sign
         run: ./Scripts/build-app.sh
 
       - name: Validate universal app

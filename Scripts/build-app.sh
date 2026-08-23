@@ -30,12 +30,28 @@ x86_64_binary="$x86_64_scratch/out/Products/Release/MatTerm"
 [[ -x "$x86_64_binary" ]] || { print -u2 "missing x86_64 build: $x86_64_binary"; exit 1; }
 app_path="$project_root/Build/MatTerm.app"
 
-rm -rf "$app_path"
-mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
-lipo -create "$arm64_binary" "$x86_64_binary" -output "$app_path/Contents/MacOS/MatTerm"
-cp "$project_root/Resources/Info.plist" "$app_path/Contents/Info.plist"
-swift "$project_root/Scripts/generate-app-icon.swift" "$project_root/Resources/AppIcon.iconset"
-iconutil -c icns "$project_root/Resources/AppIcon.iconset" -o "$app_path/Contents/Resources/AppIcon.icns"
+if [[ "$phase" == "all" || "$phase" == "merge" ]]; then
+    print "build-app: merge"
+    rm -rf "$app_path"
+    mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
+    lipo -create "$arm64_binary" "$x86_64_binary" -output "$app_path/Contents/MacOS/MatTerm"
+    cp "$project_root/Resources/Info.plist" "$app_path/Contents/Info.plist"
+fi
+if [[ "$phase" == "merge" ]]; then
+    exit 0
+fi
 
-codesign --force --deep --sign - "$app_path" >/dev/null
+if [[ "$phase" == "all" || "$phase" == "icon" ]]; then
+    print "build-app: icon"
+    swift "$project_root/Scripts/generate-app-icon.swift" "$project_root/Resources/AppIcon.iconset"
+    iconutil -c icns "$project_root/Resources/AppIcon.iconset" -o "$app_path/Contents/Resources/AppIcon.icns"
+fi
+if [[ "$phase" == "icon" ]]; then
+    exit 0
+fi
+
+if [[ "$phase" == "all" || "$phase" == "sign" ]]; then
+    print "build-app: sign"
+    codesign --force --deep --sign - "$app_path" >/dev/null
+fi
 echo "$app_path"
