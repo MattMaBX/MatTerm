@@ -24,8 +24,8 @@ if [[ "$phase" == "arm64" || "$phase" == "x86_64" ]]; then
     exit 0
 fi
 
-arm64_binary="$arm64_scratch/out/Products/Release/MatTerm"
-x86_64_binary="$x86_64_scratch/out/Products/Release/MatTerm"
+arm64_binary="$(swift build -c release --triple arm64-apple-macosx26.0 --scratch-path "$arm64_scratch" --show-bin-path)/MatTerm"
+x86_64_binary="$(swift build -c release --triple x86_64-apple-macosx26.0 --scratch-path "$x86_64_scratch" --show-bin-path)/MatTerm"
 [[ -x "$arm64_binary" ]] || { print -u2 "missing arm64 build: $arm64_binary"; exit 1; }
 [[ -x "$x86_64_binary" ]] || { print -u2 "missing x86_64 build: $x86_64_binary"; exit 1; }
 app_path="$project_root/Build/MatTerm.app"
