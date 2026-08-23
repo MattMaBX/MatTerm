@@ -92,6 +92,14 @@ struct TerminalTextBuffer {
         (cursorRow + 1, cursorColumn + 1)
     }
 
+    var hasVisibleCharacters: Bool {
+        lines.contains { line in
+            line.contains { cell in
+                !cell.isContinuation && cell.character != " "
+            }
+        }
+    }
+
     var runs: [TerminalTextRun] {
         var result: [TerminalTextRun] = []
         for (lineIndex, line) in lines.enumerated() {
@@ -152,6 +160,13 @@ struct TerminalTextBuffer {
         lines = [[]]
         cursorRow = 0
         cursorColumn = 0
+    }
+
+    mutating func removeLeadingBlankLines() {
+        while lines.count > 1 && lines[0].allSatisfy({ $0.character == " " }) {
+            lines.removeFirst()
+            cursorRow = max(0, cursorRow - 1)
+        }
     }
 
     mutating func apply(_ action: TerminalControlAction) {

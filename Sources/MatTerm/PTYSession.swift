@@ -24,6 +24,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var bracketedPasteEnabled = false
     private var pendingOutput = Data()
     private var outputFlushScheduled = false
+    private var hasReceivedVisibleOutput = false
     private var workingDirectoryTimer: Timer?
     private let outputFlushDelay: TimeInterval = 1.0 / 60.0
 
@@ -95,6 +96,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         displayRevision &+= 1
         workingDirectory = "~"
         title = kind.title
+        hasReceivedVisibleOutput = false
         bracketedPasteEnabled = false
         status = .connecting
         hasStarted = false
@@ -147,6 +149,11 @@ final class TerminalSession: ObservableObject, Identifiable {
                 }
                 respondIfNeeded(to: action)
             }
+        }
+
+        if !hasReceivedVisibleOutput {
+            textBuffer.removeLeadingBlankLines()
+            hasReceivedVisibleOutput = textBuffer.hasVisibleCharacters
         }
 
         let maximumCharacters = 240_000
