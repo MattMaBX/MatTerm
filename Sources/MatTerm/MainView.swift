@@ -139,6 +139,9 @@ private final class WindowConfigurationNSView: NSView {
         window.backgroundColor = .clear
         window.level = alwaysOnTop ? .floating : .normal
         window.toolbarStyle = displayMode == .compact ? .unifiedCompact : .automatic
+        // The compact toolbar can consume the normal titlebar drag region. Let
+        // AppKit fall back to the window background so the window remains movable.
+        window.isMovableByWindowBackground = displayMode == .compact
         window.titlebarAppearsTransparent = false
         window.titleVisibility = .visible
         window.contentView?.wantsLayer = true
