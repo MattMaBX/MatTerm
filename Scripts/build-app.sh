@@ -4,8 +4,10 @@ set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root"
 
-./Scripts/check-terminal.sh
-./Scripts/check-appearance.sh
+if [[ "${MATTERM_SKIP_CHECKS:-0}" != "1" ]]; then
+    ./Scripts/check-terminal.sh
+    ./Scripts/check-appearance.sh
+fi
 
 arm64_scratch="$project_root/.build/arm64-release"
 x86_64_scratch="$project_root/.build/x86_64-release"

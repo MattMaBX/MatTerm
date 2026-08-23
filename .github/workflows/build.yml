@@ -30,7 +30,15 @@ jobs:
           swift --version
           xcrun --sdk macosx --show-sdk-version
 
-      - name: Build and run checks
+      - name: Check terminal pipeline
+        run: ./Scripts/check-terminal.sh
+
+      - name: Check appearance fallback
+        run: ./Scripts/check-appearance.sh
+
+      - name: Build universal app
+        env:
+          MATTERM_SKIP_CHECKS: "1"
         run: ./Scripts/build-app.sh
 
       - name: Validate universal app
