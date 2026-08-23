@@ -53,9 +53,22 @@ jobs:
       - name: Check appearance fallback
         run: ./Scripts/check-appearance.sh
 
-      - name: Build universal app
+      - name: Build arm64 binary
         env:
           MATTERM_SKIP_CHECKS: "1"
+          MATTERM_BUILD_PHASE: arm64
+        run: ./Scripts/build-app.sh
+
+      - name: Build x86_64 binary
+        env:
+          MATTERM_SKIP_CHECKS: "1"
+          MATTERM_BUILD_PHASE: x86_64
+        run: ./Scripts/build-app.sh
+
+      - name: Assemble universal app
+        env:
+          MATTERM_SKIP_CHECKS: "1"
+          MATTERM_BUILD_PHASE: assemble
         run: ./Scripts/build-app.sh
 
       - name: Validate universal app
