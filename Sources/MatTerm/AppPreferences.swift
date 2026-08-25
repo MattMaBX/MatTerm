@@ -9,9 +9,10 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum AppDisplayMode: String, CaseIterable, Identifiable {
-    case traditional
-    case compact
+enum SidebarAppearance: String, CaseIterable, Identifiable {
+    case system
+    case dark
+    case light
 
     var id: String { rawValue }
 }
@@ -48,24 +49,22 @@ enum AppText {
     case backgroundOpacity
     case backgroundBlur
     case blinkingCursor
+    case metaKey
     case application
     case language
     case english
     case simplifiedChinese
     case keepWindowOnTop
-    case displayMode
-    case traditionalMode
-    case compactMode
-    case restartRequiredTitle
-    case restartRequiredMessage
-    case restartNow
-    case restartLater
+    case sidebarAppearance
+    case sidebarSystem
+    case sidebarDark
+    case sidebarLight
     case keyboardShortcuts
     case resetShortcuts
     case sshProfileSelector
     case searchSSHHosts
     case noMatchingSSHHosts
-    case shortcutNeedsCommand
+    case shortcutNeedsModifier
     case shortcutAlreadyInUse
     case splitLeft
     case splitRight
@@ -131,24 +130,22 @@ enum AppText {
             case .backgroundOpacity: return "Background opacity"
             case .backgroundBlur: return "Background blur"
             case .blinkingCursor: return "Blinking cursor"
+            case .metaKey: return "Use Option as Meta"
             case .application: return "MatTerm"
             case .language: return "Language"
             case .english: return "English"
             case .simplifiedChinese: return "Simplified Chinese"
             case .keepWindowOnTop: return "Keep Window on Top"
-            case .displayMode: return "Display Mode"
-            case .traditionalMode: return "Traditional"
-            case .compactMode: return "Compact"
-            case .restartRequiredTitle: return "Restart Required"
-            case .restartRequiredMessage: return "Restart MatTerm to apply the new display mode."
-            case .restartNow: return "Restart Now"
-            case .restartLater: return "Later"
+            case .sidebarAppearance: return "Sidebar Appearance"
+            case .sidebarSystem: return "System"
+            case .sidebarDark: return "Dark"
+            case .sidebarLight: return "Light"
             case .keyboardShortcuts: return "Keyboard Shortcuts"
             case .resetShortcuts: return "Reset Shortcuts"
             case .sshProfileSelector: return "SSH Profile Selector"
             case .searchSSHHosts: return "Search SSH hosts"
             case .noMatchingSSHHosts: return "No matching SSH hosts"
-            case .shortcutNeedsCommand: return "Shortcuts must include Command."
+            case .shortcutNeedsModifier: return "Shortcuts must include at least one modifier key."
             case .shortcutAlreadyInUse: return "This shortcut is already assigned."
             case .splitLeft: return "Split Left"
             case .splitRight: return "Split Right"
@@ -213,24 +210,22 @@ enum AppText {
             case .backgroundOpacity: return "背景不透明度"
             case .backgroundBlur: return "背景模糊"
             case .blinkingCursor: return "闪烁光标"
+            case .metaKey: return "将 Option 键作为 Meta 键"
             case .application: return "MatTerm"
             case .language: return "语言"
             case .english: return "English"
             case .simplifiedChinese: return "简体中文"
             case .keepWindowOnTop: return "窗口置顶"
-            case .displayMode: return "显示模式"
-            case .traditionalMode: return "传统模式"
-            case .compactMode: return "紧凑模式"
-            case .restartRequiredTitle: return "需要重启"
-            case .restartRequiredMessage: return "重启 MatTerm 后才能应用新的显示模式。"
-            case .restartNow: return "立即重启"
-            case .restartLater: return "稍后重启"
+            case .sidebarAppearance: return "侧边栏外观"
+            case .sidebarSystem: return "跟随系统"
+            case .sidebarDark: return "深色"
+            case .sidebarLight: return "浅色"
             case .keyboardShortcuts: return "键盘快捷键"
             case .resetShortcuts: return "恢复默认快捷键"
             case .sshProfileSelector: return "SSH 配置选择器"
             case .searchSSHHosts: return "搜索 SSH 主机"
             case .noMatchingSSHHosts: return "没有匹配的 SSH 主机"
-            case .shortcutNeedsCommand: return "快捷键必须包含 Command 键。"
+            case .shortcutNeedsModifier: return "快捷键至少需要包含一个修饰键。"
             case .shortcutAlreadyInUse: return "该快捷键已被使用。"
             case .splitLeft: return "向左分屏"
             case .splitRight: return "向右分屏"
@@ -273,53 +268,35 @@ final class AppPreferences: ObservableObject {
     @Published var alwaysOnTop: Bool {
         didSet { defaults.set(alwaysOnTop, forKey: Keys.alwaysOnTop) }
     }
-    @Published var displayMode: AppDisplayMode {
-        didSet { defaults.set(displayMode.rawValue, forKey: Keys.displayMode) }
+    @Published var sidebarAppearance: SidebarAppearance {
+        didSet { defaults.set(sidebarAppearance.rawValue, forKey: Keys.sidebarAppearance) }
     }
-
-    // Window toolbar styling is initialized at launch and applied after restart.
-    let activeDisplayMode: AppDisplayMode
+    @Published var metaKeyEnabled: Bool {
+        didSet { defaults.set(metaKeyEnabled, forKey: Keys.metaKeyEnabled) }
+    }
 
     private let defaults = UserDefaults.standard
 
     private enum Keys {
         static let language = "application.language"
         static let alwaysOnTop = "application.alwaysOnTop"
-        static let displayMode = "application.displayMode"
+        static let sidebarAppearance = "application.sidebarAppearance"
+        static let metaKeyEnabled = "terminal.metaKeyEnabled"
     }
 
     init() {
         language = AppLanguage(rawValue: defaults.string(forKey: Keys.language) ?? "") ?? .english
         alwaysOnTop = defaults.object(forKey: Keys.alwaysOnTop) as? Bool ?? false
-        let savedMode = AppDisplayMode(rawValue: defaults.string(forKey: Keys.displayMode) ?? "") ?? .traditional
-        displayMode = savedMode
-        activeDisplayMode = savedMode
+        sidebarAppearance = SidebarAppearance(
+            rawValue: defaults.string(forKey: Keys.sidebarAppearance) ?? ""
+        ) ?? .system
+        metaKeyEnabled = defaults.object(forKey: Keys.metaKeyEnabled) as? Bool ?? true
     }
 
     func text(_ value: AppText) -> String {
         value.value(language: language)
     }
 
-    var displayModeNeedsRestart: Bool {
-        displayMode != activeDisplayMode
-    }
-
-    func restartApplication() {
-        let applicationURL = Bundle.main.bundleURL
-        let configuration = NSWorkspace.OpenConfiguration()
-        configuration.activates = true
-        configuration.hides = false
-        configuration.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { application, error in
-            DispatchQueue.main.async {
-                guard application != nil, error == nil else {
-                    NSSound.beep()
-                    return
-                }
-                NSApp.terminate(nil)
-            }
-        }
-    }
 }
 
 enum ShortcutAction: String, CaseIterable, Identifiable {
@@ -373,7 +350,7 @@ struct ShortcutBinding: Codable, Equatable, Hashable {
     static let shift = 1 << 2
     static let control = 1 << 3
 
-    var includesCommand: Bool { modifiers & Self.command != 0 }
+    var hasModifier: Bool { modifiers != 0 }
 
     static func == (lhs: ShortcutBinding, rhs: ShortcutBinding) -> Bool {
         lhs.key == rhs.key && lhs.modifiers == rhs.modifiers
@@ -493,21 +470,72 @@ struct ShortcutBinding: Codable, Equatable, Hashable {
         if flags.contains(.shift) { modifiers |= Self.shift }
         if flags.contains(.control) { modifiers |= Self.control }
 
-        let key: String?
-        switch event.keyCode {
-        case 123: key = "left"
-        case 124: key = "right"
-        case 125: key = "down"
-        case 126: key = "up"
-        case 36, 76: key = "return"
-        case 48: key = "tab"
-        case 49: key = "space"
-        default:
-            key = event.charactersIgnoringModifiers?.lowercased()
-        }
+        let key = keyName(for: event.keyCode)
+            ?? event.charactersIgnoringModifiers?.lowercased()
 
         guard let key, !key.isEmpty else { return nil }
         return ShortcutBinding(key: key, modifiers: modifiers, keyCode: event.keyCode)
+    }
+
+    private static func keyName(for keyCode: UInt16) -> String? {
+        switch keyCode {
+        case UInt16(kVK_LeftArrow): return "left"
+        case UInt16(kVK_RightArrow): return "right"
+        case UInt16(kVK_DownArrow): return "down"
+        case UInt16(kVK_UpArrow): return "up"
+        case UInt16(kVK_Return), UInt16(kVK_ANSI_KeypadEnter): return "return"
+        case UInt16(kVK_Tab): return "tab"
+        case UInt16(kVK_Space): return "space"
+        case UInt16(kVK_Escape): return "escape"
+        case UInt16(kVK_ANSI_A): return "a"
+        case UInt16(kVK_ANSI_B): return "b"
+        case UInt16(kVK_ANSI_C): return "c"
+        case UInt16(kVK_ANSI_D): return "d"
+        case UInt16(kVK_ANSI_E): return "e"
+        case UInt16(kVK_ANSI_F): return "f"
+        case UInt16(kVK_ANSI_G): return "g"
+        case UInt16(kVK_ANSI_H): return "h"
+        case UInt16(kVK_ANSI_I): return "i"
+        case UInt16(kVK_ANSI_J): return "j"
+        case UInt16(kVK_ANSI_K): return "k"
+        case UInt16(kVK_ANSI_L): return "l"
+        case UInt16(kVK_ANSI_M): return "m"
+        case UInt16(kVK_ANSI_N): return "n"
+        case UInt16(kVK_ANSI_O): return "o"
+        case UInt16(kVK_ANSI_P): return "p"
+        case UInt16(kVK_ANSI_Q): return "q"
+        case UInt16(kVK_ANSI_R): return "r"
+        case UInt16(kVK_ANSI_S): return "s"
+        case UInt16(kVK_ANSI_T): return "t"
+        case UInt16(kVK_ANSI_U): return "u"
+        case UInt16(kVK_ANSI_V): return "v"
+        case UInt16(kVK_ANSI_W): return "w"
+        case UInt16(kVK_ANSI_X): return "x"
+        case UInt16(kVK_ANSI_Y): return "y"
+        case UInt16(kVK_ANSI_Z): return "z"
+        case UInt16(kVK_ANSI_0): return "0"
+        case UInt16(kVK_ANSI_1): return "1"
+        case UInt16(kVK_ANSI_2): return "2"
+        case UInt16(kVK_ANSI_3): return "3"
+        case UInt16(kVK_ANSI_4): return "4"
+        case UInt16(kVK_ANSI_5): return "5"
+        case UInt16(kVK_ANSI_6): return "6"
+        case UInt16(kVK_ANSI_7): return "7"
+        case UInt16(kVK_ANSI_8): return "8"
+        case UInt16(kVK_ANSI_9): return "9"
+        case UInt16(kVK_ANSI_Minus): return "-"
+        case UInt16(kVK_ANSI_Equal): return "="
+        case UInt16(kVK_ANSI_LeftBracket): return "["
+        case UInt16(kVK_ANSI_RightBracket): return "]"
+        case UInt16(kVK_ANSI_Semicolon): return ";"
+        case UInt16(kVK_ANSI_Quote): return "'"
+        case UInt16(kVK_ANSI_Comma): return ","
+        case UInt16(kVK_ANSI_Period): return "."
+        case UInt16(kVK_ANSI_Slash): return "/"
+        case UInt16(kVK_ANSI_Backslash): return "\\"
+        case UInt16(kVK_ANSI_Grave): return "`"
+        default: return nil
+        }
     }
 }
 
@@ -605,7 +633,7 @@ final class ShortcutStore: ObservableObject {
            let saved = try? JSONDecoder().decode([String: ShortcutBinding].self, from: data) {
             var loaded = Self.defaultBindings
             for action in ShortcutAction.allCases {
-                if let binding = saved[action.rawValue], binding.includesCommand {
+                if let binding = saved[action.rawValue], binding.hasModifier {
                     loaded[action] = binding
                 }
             }
@@ -620,7 +648,7 @@ final class ShortcutStore: ObservableObject {
     }
 
     func set(_ binding: ShortcutBinding, for action: ShortcutAction) -> AppText? {
-        guard binding.includesCommand else { return .shortcutNeedsCommand }
+        guard binding.hasModifier else { return .shortcutNeedsModifier }
         guard !bindings.contains(where: { $0.key != action && $0.value == binding }) else {
             return .shortcutAlreadyInUse
         }
@@ -750,6 +778,10 @@ final class ShortcutRecorderButton: NSButton {
     override var acceptsFirstResponder: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        if isCapturing {
+            cancelRecording()
+            return
+        }
         beginRecordingFromAccessibility()
     }
 
@@ -784,12 +816,31 @@ final class ShortcutRecorderButton: NSButton {
         _ = capture(event)
     }
 
+    override func cancelOperation(_ sender: Any?) {
+        guard isCapturing else { return }
+        cancelRecording()
+    }
+
+    override func resignFirstResponder() -> Bool {
+        let result = super.resignFirstResponder()
+        if result, isCapturing {
+            cancelRecording()
+        }
+        return result
+    }
+
     func stopRecordingCapture() {
         isCapturing = false
         if let recordingMonitor {
             NSEvent.removeMonitor(recordingMonitor)
             self.recordingMonitor = nil
         }
+    }
+
+    private func cancelRecording() {
+        guard isCapturing else { return }
+        stopRecordingCapture()
+        onCancel?()
     }
 
     private func installRecordingMonitor() {
@@ -808,12 +859,11 @@ final class ShortcutRecorderButton: NSButton {
         guard isCapturing else { return false }
 
         if event.keyCode == 53 {
-            stopRecordingCapture()
-            onCancel?()
+            cancelRecording()
             return true
         }
 
-        guard let binding = ShortcutBinding.from(event: event), binding.includesCommand else {
+        guard let binding = ShortcutBinding.from(event: event), binding.hasModifier else {
             NSSound.beep()
             return true
         }

@@ -6,21 +6,25 @@
 
 MatTerm is a focused terminal app for macOS users who work locally and over SSH. It uses a native SwiftUI and AppKit interface, the system PTY, and the system OpenSSH client to keep the app responsive, lightweight, and closely integrated with macOS.
 
+Current release: **v0.1.1**
+
 ## Features
 
 - Local terminal sessions backed by a real PTY.
 - SSH profiles imported from and synchronized with `~/.ssh/config`.
 - New or edited profiles written back to the local OpenSSH configuration.
 - ANSI colors, 256-color palette, and 24-bit truecolor rendering.
+- Ghostty VT-based terminal parsing, rendering, scrolling, and mouse tracking.
+- Native scrollback scrolling with a visible scrollbar in ordinary terminal mode.
 - Tabby community color schemes included as built-in themes.
 - Font family, font size, extra line spacing, cursor blinking, opacity, and blur controls.
-- Traditional and compact tab layouts.
+- Compact tab layout with adaptive tab widths and a separate new-tab action.
 - Keyboard-configurable SSH profile selector and pane splitting shortcuts.
 - Left, right, above, and below terminal splits with independent focus and cursor state.
 - Window size and position restoration, always-on-top mode, and a global show/hide shortcut.
 - English and Simplified Chinese UI.
 
-Port forwarding and arbitrary split layouts beyond the current directional pane workflow are not part of the first release.
+Port forwarding and arbitrary split layouts beyond the current directional pane workflow are not part of v0.1.1.
 
 ## Requirements
 
@@ -39,9 +43,17 @@ cd MatTerm
 open Build/MatTerm.app
 ```
 
-The build script runs terminal parser, PTY, performance, appearance, and app-level checks, compiles both supported CPU architectures, creates an ad-hoc signed `Build/MatTerm.app`, and embeds the standard macOS icon. `Scripts/package-app.sh` creates a universal ZIP in `Artifacts/`.
+The build script runs Ghostty VT core, PTY, multiplexer, appearance, and app-level checks, compiles both supported CPU architectures, creates an ad-hoc signed `Build/MatTerm.app`, and embeds the standard macOS icon. `Scripts/package-app.sh` creates a universal ZIP in `Artifacts/`.
 
-GitHub Actions runs the same build on `macos-26`, uploads the ZIP as an Actions artifact, and creates a Release when a tag such as `v0.1.0` is pushed. To produce a Gatekeeper-friendly release, configure these repository secrets: `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`. When all are present, the workflow performs Developer ID signing, notarization, stapling, and then uploads the notarized ZIP. Without them, it intentionally produces an ad-hoc signed ZIP.
+GitHub Actions runs the same build on `macos-26`, uploads the ZIP as an Actions artifact, and creates a Release when a tag such as `v0.1.1` is pushed. To produce a Gatekeeper-friendly release, configure these repository secrets: `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`. When all are present, the workflow performs Developer ID signing, notarization, stapling, and then uploads the notarized ZIP. Without them, it intentionally produces an ad-hoc signed ZIP.
+
+### v0.1.1
+
+- Replaced the terminal viewport implementation with the Ghostty VT core while keeping the existing MatTerm interface.
+- Fixed ordinary terminal scrollback input and added a native visible scrollbar.
+- Kept tmux, Vim, and screen mouse tracking routed to the terminal application.
+- Improved ANSI, 256-color, and truecolor rendering and removed background bleed-through artifacts.
+- Reduced redraw work during scrolling and pane interaction.
 
 For a compiler-only build:
 

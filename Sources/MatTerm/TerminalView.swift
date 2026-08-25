@@ -1,23 +1,23 @@
-import AppKit
+@preconcurrency import AppKit
 import SwiftUI
+import GhosttyVt
 
 struct TerminalView: View {
     @ObservedObject var session: TerminalSession
     let isFocusedPane: Bool
     let onFocus: () -> Void
     @EnvironmentObject private var terminalAppearance: TerminalAppearance
+    @EnvironmentObject private var preferences: AppPreferences
 
     var body: some View {
         GeometryReader { proxy in
-            ZStack {
-                TerminalBackdropView(appearance: terminalAppearance)
-                TerminalOutputView(
-                    session: session,
-                    appearance: terminalAppearance,
-                    isFocusedPane: isFocusedPane,
-                    onFocus: onFocus
-                )
-            }
+            TerminalOutputView(
+                session: session,
+                appearance: terminalAppearance,
+                metaKeyEnabled: preferences.metaKeyEnabled,
+                isFocusedPane: isFocusedPane,
+                onFocus: onFocus
+            )
             .clipped()
                 .onAppear {
                     synchronizeSession(for: proxy.size)
@@ -40,16 +40,20 @@ struct TerminalView: View {
 
     private func synchronizeSession(for size: CGSize) {
         guard size.width > 1, size.height > 1 else { return }
-        let horizontalInset: CGFloat = 32
-        let verticalInset: CGFloat = 32
+        // Keep the PTY geometry identical to the renderer's cell origin. A
+        // different inset here changes the advertised tmux width by several
+        // columns and makes pane borders drift from the pixels on screen.
+        let horizontalInset = terminalGridInset * 2
+        let verticalInset = terminalGridInset * 2
         let columns = UInt16(max(2, min(512, Int((size.width - horizontalInset) / terminalAppearance.characterWidth))))
         let rows = UInt16(max(2, min(256, Int((size.height - verticalInset) / terminalAppearance.lineHeight))))
+        session.configureColors(terminalAppearance.theme.ghosttyColorConfiguration)
         session.resize(columns: columns, rows: rows)
         session.start()
     }
 }
 
-private struct TerminalBackdropView: NSViewRepresentable {
+struct TerminalBackdropView: NSViewRepresentable {
     @ObservedObject var appearance: TerminalAppearance
 
     func makeNSView(context: Context) -> TerminalBackdropNSView {
@@ -63,18 +67,26 @@ private struct TerminalBackdropView: NSViewRepresentable {
     }
 }
 
-private final class TerminalBackdropNSView: NSView {
+final class TerminalBackdropNSView: NSView {
     private let visualEffectView = NSVisualEffectView()
     private let colorView = NSView()
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
+        layer?.isOpaque = false
+        layer?.borderWidth = 0
+        layer?.borderColor = NSColor.clear.cgColor
         colorView.wantsLayer = true
+        colorView.layer?.isOpaque = false
+        colorView.layer?.borderWidth = 0
         visualEffectView.blendingMode = .behindWindow
         visualEffectView.state = .inactive
+        visualEffectView.wantsLayer = true
+        visualEffectView.layer?.isOpaque = false
+        visualEffectView.layer?.borderWidth = 0
         addSubview(visualEffectView)
-        addSubview(colorView)
+        addSubview(colorView, positioned: .above, relativeTo: visualEffectView)
     }
 
     required init?(coder: NSCoder) {
@@ -88,9 +100,10 @@ private final class TerminalBackdropNSView: NSView {
     }
 
     func update(appearance: TerminalAppearance) {
-        let background = appearance.theme.appKitBackground
-            .withAlphaComponent(CGFloat(appearance.backgroundOpacity))
-        colorView.layer?.backgroundColor = background.cgColor
+        // Apply opacity to the theme color itself. This keeps every backdrop
+        // surface in the same color space instead of fading an opaque layer.
+        colorView.layer?.backgroundColor = appearance.effectiveBackgroundColor.cgColor
+        colorView.alphaValue = 1
 
         if appearance.backgroundBlur <= 0.01 {
             visualEffectView.state = .inactive
@@ -99,7 +112,13 @@ private final class TerminalBackdropNSView: NSView {
             visualEffectView.state = .active
             // AppKit exposes blur as native materials rather than a raw radius.
             visualEffectView.material = material(for: appearance.backgroundBlur)
-            visualEffectView.alphaValue = min(1, max(0.18, appearance.backgroundBlur / 18))
+            // The material already contains a tint. A restrained alpha keeps
+            // the desktop visible instead of stacking two opaque surfaces.
+            let blurFraction = min(max(appearance.backgroundBlur / 24, 0), 1)
+            visualEffectView.alphaValue = 0.08 + (blurFraction * 0.16)
+            visualEffectView.appearance = NSAppearance(
+                named: appearance.isDarkTheme ? .darkAqua : .aqua
+            )
         }
     }
 
@@ -113,79 +132,224 @@ private final class TerminalBackdropNSView: NSView {
     }
 }
 
+private let terminalGridInset = CGFloat(14)
+
+private final class TerminalScrollView: NSScrollView {
+    func updateTerminalMouseMode() {
+        guard let grid = documentView as? TerminalGridView,
+              let session = grid.session else { return }
+        let terminalMouseMode = session.mouseTracking != .off
+            let alternateScreen = grid.snapshot?.isAlternateScreen ?? session.displayGrid.isAlternateScreen
+        // Keep the native scroller present in normal primary-screen mode. It
+        // remains disabled by AppKit when the document is no taller than the
+        // viewport, but it must not disappear just because the current frame
+        // has not observed the first scrollback row yet.
+        hasVerticalScroller = !terminalMouseMode && !alternateScreen
+        verticalScrollElasticity = terminalMouseMode || alternateScreen ? .none : .automatic
+    }
+
+    func passThroughScrollWheel(with event: NSEvent) {
+        super.scrollWheel(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let grid = documentView as? TerminalGridView,
+              let session = grid.session else {
+            super.scrollWheel(with: event)
+            return
+        }
+        if session.mouseTracking != .off {
+            grid.handleScrollWheel(with: event)
+        } else {
+            passThroughScrollWheel(with: event)
+        }
+    }
+}
+
+private final class TerminalClipView: NSClipView {
+    weak var terminalGridView: TerminalGridView?
+    private var boundsObserver: NSObjectProtocol?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        installBoundsObserver()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        installBoundsObserver()
+    }
+
+    private func installBoundsObserver() {
+        postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.terminalGridView?.scheduleNativeViewportUpdate()
+            }
+        }
+    }
+
+    deinit {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
+    }
+
+    override var isFlipped: Bool { true }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // The document can be shorter than the viewport (an empty shell or a
+        // freshly-created alternate screen). Forward the whole pane to the
+        // terminal responder so clicking an empty tmux pane still changes
+        // focus and sends the correct viewport coordinates.
+        guard bounds.contains(point), let terminalGridView else {
+            return super.hitTest(point)
+        }
+        return terminalGridView
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard let grid = terminalGridView, let session = grid.session else {
+            super.scrollWheel(with: event)
+            return
+        }
+        if session.mouseTracking != .off {
+            grid.handleScrollWheel(with: event)
+        } else {
+            (enclosingScrollView as? TerminalScrollView)?.passThroughScrollWheel(with: event)
+        }
+    }
+
+    override func viewBoundsChanged(_ notification: Notification) {
+        super.viewBoundsChanged(notification)
+        terminalGridView?.scheduleNativeViewportUpdate()
+    }
+}
+
+// acceptsMouseMovedEvents belongs to the window, not to an individual pane.
+// A single coordinator keeps all tmux/Vim panes eligible for motion reports.
+@MainActor
+private final class TerminalMouseMotionCoordinator {
+    static let shared = TerminalMouseMotionCoordinator()
+
+    private let grids = NSHashTable<TerminalGridView>.weakObjects()
+
+    func register(_ grid: TerminalGridView, in window: NSWindow) {
+        grids.add(grid)
+        update(window)
+    }
+
+    func unregister(_ grid: TerminalGridView, from window: NSWindow?) {
+        grids.remove(grid)
+        if let window { update(window) }
+    }
+
+    func update(_ grid: TerminalGridView) {
+        guard let window = grid.window else { return }
+        update(window)
+    }
+
+    private func update(_ window: NSWindow) {
+        window.acceptsMouseMovedEvents = grids.allObjects.contains {
+            $0.window === window && $0.session?.mouseTracking == .anyMotion
+        }
+    }
+}
+
 private struct TerminalOutputView: NSViewRepresentable {
     @ObservedObject var session: TerminalSession
     @ObservedObject var appearance: TerminalAppearance
+    let metaKeyEnabled: Bool
     let isFocusedPane: Bool
     let onFocus: () -> Void
 
-    func makeNSView(context: Context) -> NSScrollView {
-        let scrollView = NSScrollView()
+    func makeNSView(context: Context) -> TerminalScrollView {
+        let scrollView = TerminalScrollView()
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = false
-        scrollView.scrollerStyle = .overlay
+        // Keep the scrollback thumb visible while the pointer is over the
+        // terminal content instead of relying on overlay-scroller discovery.
+        scrollView.scrollerStyle = .legacy
         scrollView.backgroundColor = .clear
+        scrollView.wantsLayer = true
+        scrollView.layer?.borderWidth = 0
+        scrollView.layer?.borderColor = NSColor.clear.cgColor
 
-        let textView = TerminalTextView()
-        textView.wantsLayer = true
-        textView.layer?.backgroundColor = NSColor.clear.cgColor
-        textView.session = session
-        textView.terminalAppearance = appearance
-        textView.isFocusedPane = isFocusedPane
-        textView.onFocus = onFocus
-        textView.configure()
-        scrollView.documentView = textView
+        let clipView = TerminalClipView(frame: .zero)
+        clipView.drawsBackground = false
+        scrollView.contentView = clipView
+
+        let grid = TerminalGridView()
+        grid.wantsLayer = true
+        grid.layer?.backgroundColor = NSColor.clear.cgColor
+        grid.session = session
+        grid.terminalAppearance = appearance
+        grid.metaKeyEnabled = metaKeyEnabled
+        grid.isFocusedPane = isFocusedPane
+        grid.onFocus = onFocus
+        grid.configure()
+        session.configureColors(appearance.theme.ghosttyColorConfiguration)
+        clipView.terminalGridView = grid
+        scrollView.documentView = grid
+        scrollView.updateTerminalMouseMode()
 
         if isFocusedPane {
-            DispatchQueue.main.async {
-                textView.focus()
-            }
+            DispatchQueue.main.async { grid.focus() }
         }
         return scrollView
     }
 
-    func updateNSView(_ nsView: NSScrollView, context: Context) {
-        guard let textView = nsView.documentView as? TerminalTextView else { return }
-        textView.session = session
-        textView.terminalAppearance = appearance
-        textView.onFocus = onFocus
-        textView.updateFocusState(isFocusedPane)
-        textView.updateAppearance()
-        textView.updateContent()
+    func updateNSView(_ nsView: TerminalScrollView, context: Context) {
+        guard let grid = nsView.documentView as? TerminalGridView else { return }
+        grid.session = session
+        grid.terminalAppearance = appearance
+        grid.metaKeyEnabled = metaKeyEnabled
+        grid.onFocus = onFocus
+        session.configureColors(appearance.theme.ghosttyColorConfiguration)
+        grid.updateFocusState(isFocusedPane)
+        grid.updateAppearance()
+        grid.updateMouseTracking()
+        grid.updateContent()
+        nsView.updateTerminalMouseMode()
 
         if isFocusedPane,
-           nsView.window?.firstResponder !== textView,
+           nsView.window?.firstResponder !== grid,
            nsView.window?.firstResponder == nsView.window?.contentView {
-            DispatchQueue.main.async {
-                textView.focus()
-            }
+            DispatchQueue.main.async { grid.focus() }
         }
-
         if isFocusedPane, context.coordinator.lastFocusRevision != session.focusRevision {
             context.coordinator.lastFocusRevision = session.focusRevision
-            DispatchQueue.main.async {
-                textView.focus()
-            }
+            DispatchQueue.main.async { grid.focus() }
         }
     }
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
+    func makeCoordinator() -> Coordinator { Coordinator() }
 
-    final class Coordinator {
-        var lastFocusRevision = -1
-    }
+    final class Coordinator { var lastFocusRevision = -1 }
 }
 
+/// Fixed-cell AppKit terminal renderer.
+///
+/// NSTextView is deliberately not used here. Its line breaking and layout
+/// manager operate on paragraphs; terminal output is a mutable matrix. Drawing
+/// each cell at `column * characterWidth` is what keeps tmux pane borders,
+/// full-screen redraws and cursor coordinates stable.
 @MainActor
-private final class TerminalTextView: NSTextView {
+private final class TerminalGridView: NSTextView {
     weak var session: TerminalSession?
     weak var terminalAppearance: TerminalAppearance?
     var onFocus: (() -> Void)?
+    var metaKeyEnabled = true
+    var isFocusedPane = true
+
+    private(set) var snapshot: TerminalGridSnapshot?
     private var lastDisplayRevision: UInt64 = 0
     private var lastFontFamily = ""
     private var lastFontSize: Double = 0
@@ -197,28 +361,27 @@ private final class TerminalTextView: NSTextView {
     private var lastTerminalColumns: UInt16?
     private var lastTerminalRows: UInt16?
     private var cachedANSIColors: [NSColor] = []
+    private var cachedPaletteColors: [NSColor] = []
+    private var cachedNSColors: [TerminalColor: NSColor] = [:]
+    private var synchronizingNativeViewport = false
+    private var nativeViewportUpdateScheduled = false
     private var cursorBlinkTimer: Timer?
     private var windowKeyObserver: NSObjectProtocol?
     private var cursorBlinkOn = true
-    private var cursorRanges: [CursorRange] = []
+    private var lastMouseTracking: TerminalMouseTracking?
+    private var pressedMouseButton: Int?
+    private weak var registeredWindow: NSWindow?
 
-    private struct CursorRange {
-        let range: NSRange
-        let baseAttributes: [NSAttributedString.Key: Any]
-    }
-
+    override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
-
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
-    override func drawInsertionPoint(in rect: NSRect, color: NSColor, turnedOn flag: Bool) {
-        // The terminal buffer owns cursor rendering and blinking.
-    }
-
     func configure() {
+        // Keep NSTextView as the native input/accessibility host. Its text
+        // system is not used for rendering; draw(_:) below owns every cell.
         isEditable = false
         isSelectable = true
-        isRichText = true
+        isRichText = false
         allowsUndo = false
         usesFontPanel = false
         isAutomaticQuoteSubstitutionEnabled = false
@@ -227,54 +390,60 @@ private final class TerminalTextView: NSTextView {
         insertionPointColor = .clear
         drawsBackground = false
         backgroundColor = .clear
-        textContainerInset = NSSize(width: 14, height: 14)
+        textContainerInset = .zero
         textContainer?.lineFragmentPadding = 0
-        textContainer?.lineBreakMode = .byCharWrapping
         textContainer?.widthTracksTextView = false
-        isVerticallyResizable = true
+        isVerticallyResizable = false
         isHorizontallyResizable = false
-        minSize = NSSize(width: 0, height: 0)
-        maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        autoresizingMask = [.width]
+        focusRingType = .none
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
         updateAppearance()
+        updateMouseTracking()
         updateContent()
+    }
+
+    func updateMouseTracking() {
+        guard let session else { return }
+        if lastMouseTracking != session.mouseTracking {
+            lastMouseTracking = session.mouseTracking
+            if session.mouseTracking == .off { pressedMouseButton = nil }
+        }
+        TerminalMouseMotionCoordinator.shared.update(self)
     }
 
     func focus() {
         guard let window, window.isVisible else { return }
-        if window.firstResponder !== self {
-            _ = window.makeFirstResponder(self)
-        }
+        if window.firstResponder !== self { _ = window.makeFirstResponder(self) }
     }
 
     func updateAppearance() {
-        guard let terminalAppearance else { return }
-        let familyChanged = lastFontFamily != terminalAppearance.fontFamily
-        let sizeChanged = lastFontSize != terminalAppearance.fontSize
-        let lineSpacingChanged = lastLineSpacing != terminalAppearance.lineSpacing
-        let themeChanged = lastTheme != terminalAppearance.theme
-        guard familyChanged || sizeChanged || lineSpacingChanged || themeChanged else { return }
-
-        lastFontFamily = terminalAppearance.fontFamily
-        lastFontSize = terminalAppearance.fontSize
-        lastLineSpacing = terminalAppearance.lineSpacing
-        lastTheme = terminalAppearance.theme
-        cachedANSIColors = terminalAppearance.theme.appKitANSIColors
-        typingAttributes = [.font: terminalAppearance.font(ofSize: CGFloat(terminalAppearance.fontSize))]
+        guard let appearance = terminalAppearance else { return }
+        let changed = lastFontFamily != appearance.fontFamily
+            || lastFontSize != appearance.fontSize
+            || lastLineSpacing != appearance.lineSpacing
+            || lastTheme != appearance.theme
+        guard changed else { return }
+        lastFontFamily = appearance.fontFamily
+        lastFontSize = appearance.fontSize
+        lastLineSpacing = appearance.lineSpacing
+        lastTheme = appearance.theme
+        cachedANSIColors = appearance.theme.appKitANSIColors
+        cachedPaletteColors.removeAll(keepingCapacity: true)
+        cachedNSColors.removeAll(keepingCapacity: true)
         lastDisplayRevision = 0
-        cursorRanges = []
         lastCursorBlinkOn = nil
         lastCursorBlinkEnabled = nil
         updateContent()
     }
 
     func updateContent() {
-        guard let session, let terminalAppearance else { return }
+        guard let session, let appearance = terminalAppearance else { return }
         let contentChanged = lastDisplayRevision != session.displayRevision
-        let fontChanged = lastFontSize != terminalAppearance.fontSize
-            || lastFontFamily != terminalAppearance.fontFamily
-            || lastLineSpacing != terminalAppearance.lineSpacing
-        let blinkSettingChanged = lastCursorBlinkEnabled != terminalAppearance.cursorBlinkEnabled
+        let fontChanged = lastFontSize != appearance.fontSize
+            || lastFontFamily != appearance.fontFamily
+            || lastLineSpacing != appearance.lineSpacing
+        let blinkSettingChanged = lastCursorBlinkEnabled != appearance.cursorBlinkEnabled
         let blinkChanged = lastCursorBlinkOn != cursorBlinkOn
         let focusChanged = lastFocusState != isFocusedPane
         guard contentChanged || fontChanged || blinkSettingChanged || blinkChanged || focusChanged else { return }
@@ -282,74 +451,30 @@ private final class TerminalTextView: NSTextView {
         if contentChanged || fontChanged || blinkSettingChanged || focusChanged {
             cursorBlinkOn = true
         }
-
+        let shouldFollowOutput = isNearBottom
         if contentChanged || fontChanged {
-            let shouldFollowOutput = isNearBottom
-            let rendered = NSMutableAttributedString()
-            var updatedCursorRanges: [CursorRange] = []
-
-            for run in session.displayRuns {
-                var attributes: [NSAttributedString.Key: Any] = [
-                    .font: terminalAppearance.font(
-                        ofSize: CGFloat(terminalAppearance.fontSize),
-                        bold: run.style.bold
-                    ),
-                    .foregroundColor: nsColor(
-                        for: run.style.inverse ? run.style.background : run.style.foreground,
-                        fallback: terminalAppearance.theme.appKitForeground
-                    ),
-                    .backgroundColor: nsColor(
-                        for: run.style.inverse ? run.style.foreground : run.style.background,
-                        fallback: run.style.inverse ? terminalAppearance.theme.appKitForeground : .clear
-                    )
-                ]
-                let paragraphStyle = NSMutableParagraphStyle()
-                // Keep glyph line boxes at the font's native height. The
-                // preference adds space after terminal rows instead of
-                // stretching the current row.
-                paragraphStyle.lineSpacing = 0
-                paragraphStyle.paragraphSpacing = CGFloat(terminalAppearance.lineSpacing)
-                paragraphStyle.minimumLineHeight = terminalAppearance.fontLineHeight
-                paragraphStyle.maximumLineHeight = terminalAppearance.fontLineHeight
-                attributes[.paragraphStyle] = paragraphStyle
-                if run.style.underline {
-                    attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue
-                }
-                if run.style.dim {
-                    let foreground = (attributes[.foregroundColor] as? NSColor) ?? terminalAppearance.theme.appKitForeground
-                    attributes[.foregroundColor] = foreground.withAlphaComponent(0.62)
-                }
-
-                let range = NSRange(location: rendered.length, length: run.text.utf16.count)
-                rendered.append(NSAttributedString(string: run.text, attributes: attributes))
-                if run.isCursor, range.length > 0 {
-                    updatedCursorRanges.append(CursorRange(range: range, baseAttributes: attributes))
-                }
-            }
-
-            textStorage?.setAttributedString(rendered)
-            cursorRanges = updatedCursorRanges
-            updateCursorAttributes()
+            snapshot = session.displayGrid
+            if let snapshot { updateRenderColors(snapshot) }
             updateDocumentFrame()
-            if shouldFollowOutput {
-                scrollToEndOfDocument(nil)
+            synchronizeNativeViewport()
+            invalidateVisibleTerminalArea()
+            if snapshot?.isAlternateScreen == true {
+                scrollDocumentToTop()
+            } else if shouldFollowOutput {
+                scrollDocumentToBottom()
             }
-        } else if blinkChanged || blinkSettingChanged {
-            // Blinking only changes the cursor character. Avoid relaying out
-            // the entire scrollback buffer for every blink tick.
-            updateCursorAttributes()
+        } else if blinkChanged || blinkSettingChanged || focusChanged {
+            invalidateVisibleTerminalArea()
         }
 
         lastDisplayRevision = session.displayRevision
-        lastFontFamily = terminalAppearance.fontFamily
-        lastFontSize = terminalAppearance.fontSize
-        lastLineSpacing = terminalAppearance.lineSpacing
+        lastFontFamily = appearance.fontFamily
+        lastFontSize = appearance.fontSize
+        lastLineSpacing = appearance.lineSpacing
         lastCursorBlinkOn = cursorBlinkOn
-        lastCursorBlinkEnabled = terminalAppearance.cursorBlinkEnabled
+        lastCursorBlinkEnabled = appearance.cursorBlinkEnabled
         lastFocusState = isFocusedPane
     }
-
-    var isFocusedPane = true
 
     func updateFocusState(_ focused: Bool) {
         guard isFocusedPane != focused else {
@@ -361,26 +486,6 @@ private final class TerminalTextView: NSTextView {
         updateContent()
     }
 
-    private func updateCursorAttributes() {
-        guard let textStorage, let terminalAppearance else { return }
-        let cursorVisible = isFocusedPane && (!terminalAppearance.cursorBlinkEnabled || cursorBlinkOn)
-        textStorage.beginEditing()
-        for cursor in cursorRanges {
-            if cursorVisible {
-                textStorage.addAttributes([
-                    .foregroundColor: terminalAppearance.theme.appKitBackground,
-                    .backgroundColor: terminalAppearance.theme.appKitCursor
-                ], range: cursor.range)
-            } else {
-                textStorage.setAttributes(cursor.baseAttributes, range: cursor.range)
-            }
-        }
-        textStorage.endEditing()
-        lastCursorBlinkOn = cursorBlinkOn
-        lastCursorBlinkEnabled = terminalAppearance.cursorBlinkEnabled
-        setNeedsDisplay(bounds)
-    }
-
     private var isNearBottom: Bool {
         guard let scrollView = enclosingScrollView else { return true }
         let visibleMaxY = NSMaxY(scrollView.contentView.bounds)
@@ -388,37 +493,106 @@ private final class TerminalTextView: NSTextView {
         return documentMaxY - visibleMaxY < 24
     }
 
-    private func updateDocumentFrame() {
-        guard let scrollView = enclosingScrollView,
-              let textContainer,
-              let layoutManager else { return }
+    private func scrollDocumentToBottom() {
+        guard let scrollView = enclosingScrollView else { return }
+        let clipView = scrollView.contentView
+        let maxY = max(0, NSMaxY(bounds) - clipView.bounds.height)
+        var clipBounds = clipView.bounds
+        clipBounds.origin = NSPoint(x: clipBounds.origin.x, y: maxY)
+        clipView.bounds = clipBounds
+        scrollView.reflectScrolledClipView(clipView)
+    }
 
-        let width = max(scrollView.contentView.bounds.width, 1)
-        textContainer.containerSize = NSSize(
-            width: max(width - textContainerInset.width * 2, 1),
-            height: CGFloat.greatestFiniteMagnitude
-        )
-        textContainer.widthTracksTextView = false
-        layoutManager.ensureLayout(for: textContainer)
-        let usedHeight = layoutManager.usedRect(for: textContainer).height
-        let height = max(scrollView.contentView.bounds.height, usedHeight + textContainerInset.height * 2)
-        frame = NSRect(x: 0, y: 0, width: width, height: height)
-        resizeSessionToViewport()
+    private func scrollDocumentToTop() {
+        guard let scrollView = enclosingScrollView else { return }
+        let clipView = scrollView.contentView
+        var clipBounds = clipView.bounds
+        clipBounds.origin = NSPoint(x: clipBounds.origin.x, y: 0)
+        clipView.bounds = clipBounds
+        scrollView.reflectScrolledClipView(clipView)
+    }
+
+    func scheduleNativeViewportUpdate() {
+        guard !nativeViewportUpdateScheduled else { return }
+        nativeViewportUpdateScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.nativeViewportUpdateScheduled = false
+            self.nativeViewportDidChange()
+        }
+    }
+
+    func nativeViewportDidChange() {
+        guard !synchronizingNativeViewport,
+              let session,
+              let snapshot,
+              let appearance = terminalAppearance,
+              !snapshot.isAlternateScreen,
+              session.mouseTracking == .off else { return }
+        guard let scrollView = enclosingScrollView else { return }
+        let lineHeight = max(1, appearance.lineHeight)
+        let maxRow = max(0, snapshot.totalRows - snapshot.rows)
+        let row = min(maxRow, max(0, Int((scrollView.contentView.bounds.minY / lineHeight).rounded())))
+        guard row != snapshot.screenTopIndex else { return }
+        session.scrollViewport(row: row)
+        // Native scrolling can move the clip view before SwiftUI gets a
+        // chance to re-enter updateNSView. Refresh the viewport synchronously
+        // so newly exposed history rows are drawn instead of showing the
+        // document's never-painted background.
+        updateContent()
+    }
+
+    private func synchronizeNativeViewport() {
+        guard let snapshot,
+              let appearance = terminalAppearance,
+              let scrollView = enclosingScrollView,
+              !snapshot.isAlternateScreen,
+              session?.mouseTracking == .off else { return }
+        let lineHeight = max(1, appearance.lineHeight)
+        let maxY = max(0, bounds.height - scrollView.contentView.bounds.height)
+        let targetY = min(maxY, max(0, CGFloat(snapshot.screenTopIndex) * lineHeight))
+        var clipBounds = scrollView.contentView.bounds
+        guard abs(clipBounds.origin.y - targetY) > 0.5 else { return }
+        clipBounds.origin.y = targetY
+        synchronizingNativeViewport = true
+        scrollView.contentView.bounds = clipBounds
+        scrollView.reflectScrolledClipView(scrollView.contentView)
+        synchronizingNativeViewport = false
+    }
+
+    private func updateDocumentFrame() {
+        guard let session,
+              let scrollView = enclosingScrollView,
+              let appearance = terminalAppearance else { return }
+        let viewport = scrollView.contentView.bounds.size
+        guard viewport.width > 1, viewport.height > 1 else { return }
+        let rows = snapshot?.contentRowCount ?? Int(session.rows)
+        let width = max(viewport.width, CGFloat(snapshot?.columns ?? Int(session.columns)) * appearance.characterWidth + terminalGridInset * 2)
+        let height = max(viewport.height, CGFloat(rows) * appearance.lineHeight + terminalGridInset * 2)
+        let documentSize = NSSize(width: width, height: height)
+        if frame.size != documentSize {
+            frame = NSRect(origin: .zero, size: documentSize)
+        }
+    }
+
+    private func invalidateVisibleTerminalArea() {
+        guard let clipView = enclosingScrollView?.contentView else {
+            setNeedsDisplay(visibleRect)
+            return
+        }
+        let rect = convert(clipView.bounds, from: clipView).intersection(bounds)
+        guard !rect.isNull, !rect.isEmpty else { return }
+        setNeedsDisplay(rect)
     }
 
     private func resizeSessionToViewport() {
-        guard let session, let terminalAppearance, let scrollView = enclosingScrollView else { return }
+        guard let session,
+              let appearance = terminalAppearance,
+              let scrollView = enclosingScrollView else { return }
         let viewport = scrollView.contentView.bounds.size
         guard viewport.width > 1, viewport.height > 1 else { return }
-
-        let columns = UInt16(max(
-            2,
-            min(512, Int((viewport.width - textContainerInset.width * 2) / terminalAppearance.characterWidth))
-        ))
-        let rows = UInt16(max(
-            2,
-            min(256, Int((viewport.height - textContainerInset.height * 2) / terminalAppearance.lineHeight))
-        ))
+        let columns = UInt16(max(2, min(512, Int((viewport.width - terminalGridInset * 2) / appearance.characterWidth))))
+        let rows = UInt16(max(2, min(256, Int((viewport.height - terminalGridInset * 2) / appearance.lineHeight))))
         guard columns != lastTerminalColumns || rows != lastTerminalRows else { return }
         lastTerminalColumns = columns
         lastTerminalRows = rows
@@ -427,10 +601,197 @@ private final class TerminalTextView: NSTextView {
 
     override func layout() {
         super.layout()
+        // NSScrollView can lay out its document before the SwiftUI host has
+        // its final pane width. Recompute the document frame on every layout
+        // pass so the hit-test area always covers the complete pane, not just
+        // the width of the first short prompt.
+        updateDocumentFrame()
         resizeSessionToViewport()
     }
 
+    override func draw(_ dirtyRect: NSRect) {
+        guard let snapshot, let appearance = terminalAppearance else { return }
+        let characterWidth = appearance.characterWidth
+        let lineHeight = appearance.lineHeight
+        // AppKit may reuse a layer's old dirty rect while a clip view is
+        // moved to a distant scrollback position. Derive the render range
+        // from the current clip bounds so newly exposed history is never
+        // mistaken for the old bottom-of-document rows.
+        let visibleDocumentRect: NSRect
+        if let clipView = enclosingScrollView?.contentView {
+            visibleDocumentRect = convert(clipView.bounds, from: clipView)
+                .intersection(bounds)
+        } else {
+            visibleDocumentRect = dirtyRect.intersection(bounds)
+        }
+        guard !visibleDocumentRect.isNull, !visibleDocumentRect.isEmpty else { return }
+        let drawRect = dirtyRect.intersects(visibleDocumentRect)
+            ? dirtyRect.intersection(visibleDocumentRect)
+            : visibleDocumentRect
+        let firstRow = max(0, Int(floor((drawRect.minY - terminalGridInset) / lineHeight)) - 1)
+        let lastRow = min(snapshot.contentRowCount - 1, Int(ceil((drawRect.maxY - terminalGridInset) / lineHeight)) + 1)
+        guard firstRow <= lastRow else { return }
+
+        NSGraphicsContext.saveGraphicsState()
+        // The terminal's default background is a real cell color. Paint it
+        // across the dirty region first so the app's sidebar/split hierarchy
+        // cannot bleed through the transparent document and form vertical
+        // divider artifacts while scrolling.
+        let defaultBackground = nsColor(
+            for: snapshot.defaultBackground,
+            fallback: appearance.theme.appKitBackground
+        )
+        defaultBackground.setFill()
+        drawRect.fill()
+        for row in firstRow...lastRow {
+            let line = snapshot.line(at: row)
+            let y = terminalGridInset + CGFloat(row) * lineHeight
+            let firstColumn = max(0, Int(floor((drawRect.minX - terminalGridInset) / characterWidth)) - 1)
+            let lastColumn = min(snapshot.columns - 1, Int(ceil((drawRect.maxX - terminalGridInset) / characterWidth)) + 1)
+            guard firstColumn <= lastColumn else { continue }
+
+            // Paint backgrounds first so a later cell can never cover text
+            // from an earlier cell in the same row.
+            for column in firstColumn...lastColumn {
+                let cell = line.indices.contains(column)
+                    ? line[column]
+                    : TerminalCell(character: " ", style: TerminalTextStyle())
+                let isCursor = cursorIsAt(snapshot: snapshot, row: row, column: column)
+                let width = cell.isContinuation ? 0 : (line.indices.contains(column + 1) && line[column + 1].isContinuation ? 2 : 1)
+                guard width > 0 else { continue }
+                let rect = NSRect(
+                    x: terminalGridInset + CGFloat(column) * characterWidth,
+                    y: y,
+                    width: characterWidth * CGFloat(width),
+                    height: lineHeight
+                )
+                let colors = colors(for: cell.style, snapshot: snapshot, appearance: appearance)
+                let background = isCursor
+                    ? nsColor(for: snapshot.cursorColor, fallback: appearance.theme.appKitCursor)
+                    : colors.background
+                if background.alphaComponent > 0 {
+                    background.setFill()
+                    rect.fill()
+                }
+            }
+
+            // Coalesce adjacent cells with the same style into one attributed
+            // string. This avoids one dictionary and one attributed string per
+            // cell during scrolling and full-screen redraws.
+            var runString = ""
+            var runStyle: TerminalTextStyle?
+            var runIsCursor = false
+            var runRect = NSRect.zero
+
+            func flushTextRun() {
+                guard !runString.isEmpty, let style = runStyle else { return }
+                var foreground = runIsCursor
+                    ? nsColor(for: snapshot.defaultBackground, fallback: appearance.theme.appKitBackground)
+                    : colors(for: style, snapshot: snapshot, appearance: appearance).foreground
+                if style.dim { foreground = foreground.withAlphaComponent(0.62) }
+                let font = appearance.font(
+                    ofSize: CGFloat(appearance.fontSize),
+                    bold: style.bold,
+                    italic: style.italic
+                )
+                var attributes: [NSAttributedString.Key: Any] = [
+                    .font: font,
+                    .foregroundColor: foreground
+                ]
+                if style.underline { attributes[.underlineStyle] = NSUnderlineStyle.single.rawValue }
+                if style.strikethrough {
+                    attributes[.strikethroughStyle] = NSUnderlineStyle.single.rawValue
+                }
+                NSAttributedString(string: runString, attributes: attributes).draw(in: runRect)
+                runString.removeAll(keepingCapacity: true)
+                runStyle = nil
+                runIsCursor = false
+                runRect = .zero
+            }
+
+            for column in firstColumn...lastColumn {
+                let cell = line.indices.contains(column)
+                    ? line[column]
+                    : TerminalCell(character: " ", style: TerminalTextStyle())
+                let isCursor = cursorIsAt(snapshot: snapshot, row: row, column: column)
+                let width = cell.isContinuation ? 0 : (line.indices.contains(column + 1) && line[column + 1].isContinuation ? 2 : 1)
+                guard width > 0 else { continue }
+                let rect = NSRect(
+                    x: terminalGridInset + CGFloat(column) * characterWidth,
+                    y: y,
+                    width: characterWidth * CGFloat(width),
+                    height: lineHeight
+                )
+                let hidden = cell.character == " "
+                    || cell.style.invisible
+                    || (cell.style.blink && !cursorBlinkOn)
+                guard !hidden else {
+                    flushTextRun()
+                    continue
+                }
+
+                let adjacent = !runString.isEmpty
+                    && runStyle == cell.style
+                    && runIsCursor == isCursor
+                    && abs(NSMaxX(runRect) - rect.minX) < 0.5
+                if !adjacent { flushTextRun() }
+                if runString.isEmpty {
+                    runStyle = cell.style
+                    runIsCursor = isCursor
+                    runRect = rect
+                } else {
+                    runRect.size.width += rect.width
+                }
+                runString.append(String(cell.character))
+            }
+            flushTextRun()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    private func cursorIsAt(snapshot: TerminalGridSnapshot, row: Int, column: Int) -> Bool {
+        guard snapshot.cursorVisible, isFocusedPane, cursorBlinkOn else { return false }
+        let cursorRow = snapshot.documentCursorRow
+        guard row == cursorRow else { return false }
+        let clampedColumn = min(max(0, snapshot.cursorColumn), max(0, snapshot.columns - 1))
+        return column == clampedColumn
+    }
+
+    private func colors(
+        for style: TerminalTextStyle,
+        snapshot: TerminalGridSnapshot,
+        appearance: TerminalAppearance
+    ) -> (foreground: NSColor, background: NSColor) {
+        let defaultForeground = nsColor(
+            for: snapshot.defaultForeground,
+            fallback: appearance.theme.appKitForeground
+        )
+        let defaultBackground = nsColor(
+            for: snapshot.defaultBackground,
+            fallback: appearance.theme.appKitBackground
+        )
+        if style.inverse {
+            return (
+                nsColor(for: style.background, fallback: defaultBackground),
+                nsColor(for: style.foreground, fallback: defaultForeground)
+            )
+        }
+        return (
+            nsColor(for: style.foreground, fallback: defaultForeground),
+            nsColor(for: style.background, fallback: .clear)
+        )
+    }
+
+    private func updateRenderColors(_ snapshot: TerminalGridSnapshot) {
+        cachedNSColors.removeAll(keepingCapacity: true)
+        cachedPaletteColors = snapshot.palette.map { color in
+            nsColor(for: color, fallback: .clear)
+        }
+    }
+
     override func viewDidMoveToWindow() {
+        let previousWindow = registeredWindow
+        TerminalMouseMotionCoordinator.shared.unregister(self, from: previousWindow)
         super.viewDidMoveToWindow()
         cursorBlinkTimer?.invalidate()
         cursorBlinkTimer = nil
@@ -438,27 +799,26 @@ private final class TerminalTextView: NSTextView {
             NotificationCenter.default.removeObserver(windowKeyObserver)
             self.windowKeyObserver = nil
         }
-        if window != nil {
+        if let window {
+            registeredWindow = window
+            TerminalMouseMotionCoordinator.shared.register(self, in: window)
             let timer = Timer(timeInterval: 0.55, target: self, selector: #selector(toggleCursorBlink), userInfo: nil, repeats: true)
             cursorBlinkTimer = timer
             RunLoop.main.add(timer, forMode: .common)
-
             windowKeyObserver = NotificationCenter.default.addObserver(
                 forName: NSWindow.didBecomeKeyNotification,
                 object: window,
                 queue: .main
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in
-                    if self?.isFocusedPane == true {
-                        self?.focus()
-                    }
+                    if self?.isFocusedPane == true { self?.focus() }
                 }
             }
+        } else {
+            registeredWindow = nil
         }
         DispatchQueue.main.async { [weak self] in
-            if self?.isFocusedPane == true {
-                self?.focus()
-            }
+            if self?.isFocusedPane == true { self?.focus() }
             self?.updateDocumentFrame()
         }
     }
@@ -466,10 +826,7 @@ private final class TerminalTextView: NSTextView {
     @objc private func toggleCursorBlink() {
         guard isFocusedPane else { return }
         guard terminalAppearance?.cursorBlinkEnabled == true else {
-            if !cursorBlinkOn {
-                cursorBlinkOn = true
-                updateContent()
-            }
+            if !cursorBlinkOn { cursorBlinkOn = true; updateContent() }
             return
         }
         cursorBlinkOn.toggle()
@@ -479,72 +836,116 @@ private final class TerminalTextView: NSTextView {
     override func mouseDown(with event: NSEvent) {
         onFocus?()
         focus()
+        if let session, session.mouseTracking != .off {
+            pressedMouseButton = mouseButton(for: event)
+            sendMouse(.press, event: event, button: pressedMouseButton ?? -1, anyButtonPressed: true)
+            return
+        }
         super.mouseDown(with: event)
     }
 
-    override func paste(_ sender: Any?) {
-        pasteClipboardContents()
+    override func mouseUp(with event: NSEvent) {
+        if let session, session.mouseTracking != .off {
+            sendMouse(.release, event: event, button: pressedMouseButton ?? mouseButton(for: event), anyButtonPressed: false)
+            pressedMouseButton = nil
+            return
+        }
+        super.mouseUp(with: event)
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        guard event.modifierFlags.contains(.command) else {
-            return super.performKeyEquivalent(with: event)
-        }
+    override func becomeFirstResponder() -> Bool {
+        let became = super.becomeFirstResponder()
+        if became { session?.sendFocusEvent(true) }
+        return became
+    }
 
-        switch event.keyCode {
-        case 8 where selectedRange().length > 0: // Cmd-C
-            copy(nil)
-            return true
-        case 9: // Cmd-V and Cmd-Shift-V
+    override func resignFirstResponder() -> Bool {
+        let resigned = super.resignFirstResponder()
+        if resigned { session?.sendFocusEvent(false) }
+        return resigned
+    }
+
+    override func rightMouseDown(with event: NSEvent) { mouseDown(with: event) }
+    override func rightMouseUp(with event: NSEvent) { mouseUp(with: event) }
+    override func otherMouseDown(with event: NSEvent) { mouseDown(with: event) }
+    override func otherMouseUp(with event: NSEvent) { mouseUp(with: event) }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard let session else { return }
+        guard session.mouseTracking == .buttonMotion || session.mouseTracking == .anyMotion else { return }
+        sendMouse(.motion, event: event, button: pressedMouseButton ?? -1, anyButtonPressed: pressedMouseButton != nil)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) { mouseDragged(with: event) }
+    override func otherMouseDragged(with event: NSEvent) { mouseDragged(with: event) }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard session?.mouseTracking == .anyMotion else { return }
+        sendMouse(.motion, event: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard session?.mouseTracking != .off else {
+            // Content hit-testing is routed to this view so tmux/Vim can own
+            // mouse input. Ordinary wheel events still belong to NSScrollView
+            // so AppKit moves its clip view and native scroller.
+            (enclosingScrollView as? TerminalScrollView)?.passThroughScrollWheel(with: event)
+            return
+        }
+        handleScrollWheel(with: event)
+    }
+
+    func handleScrollWheel(with event: NSEvent) {
+        guard let session, session.mouseTracking != .off else { return }
+        onFocus?()
+        focus()
+        let delta = abs(event.scrollingDeltaY) > .ulpOfOne ? event.scrollingDeltaY : event.deltaY
+        guard abs(delta) > .ulpOfOne else { return }
+        sendMouse(delta > 0 ? .scrollUp : .scrollDown, event: event, anyButtonPressed: false)
+    }
+
+    override func paste(_ sender: Any?) { pasteClipboardContents() }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: event) }
+        if event.keyCode == 9 {
             pasteClipboardContents()
             return true
-        default:
-            return super.performKeyEquivalent(with: event)
         }
+        return super.performKeyEquivalent(with: event)
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
-        if let text = insertString as? String {
-            session?.send(text)
-        }
+        if let text = insertString as? String { session?.send(text) }
     }
 
     override func keyDown(with event: NSEvent) {
-        guard let session else {
-            super.keyDown(with: event)
-            return
-        }
-
+        guard let session else { super.keyDown(with: event); return }
         if event.modifierFlags.contains(.command) {
-            if event.keyCode == 9 {
-                pasteClipboardContents()
-            } else {
-                super.keyDown(with: event)
-            }
+            if event.keyCode == 9 { pasteClipboardContents() } else { super.keyDown(with: event) }
             return
         }
-
         if event.modifierFlags.contains(.control),
            let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
-            if value == 0x20 {
-                session.send("\0")
-                return
-            }
+            if value == 0x20 { session.send("\0"); return }
             if (0x40...0x7F).contains(value), let controlScalar = UnicodeScalar(value & 0x1F) {
-                session.send(String(controlScalar))
-                return
+                session.send(String(controlScalar)); return
             }
         }
-
         if let sequence = escapeSequence(for: event) {
             session.send(sequence)
-        } else if event.modifierFlags.contains(.option),
-                  let characters = event.charactersIgnoringModifiers,
-                  !characters.isEmpty {
-            session.send("\u{1B}" + characters)
+        } else if event.modifierFlags.contains(.option) {
+            if metaKeyEnabled,
+               let characters = event.charactersIgnoringModifiers,
+               !characters.isEmpty {
+                session.send("\u{1B}" + characters)
+            } else if let characters = event.characters, !characters.isEmpty {
+                session.send(characters)
+            } else {
+                interpretKeyEvents([event])
+            }
         } else {
-            // Let AppKit's text system handle composed characters and IME input.
             interpretKeyEvents([event])
         }
     }
@@ -555,38 +956,81 @@ private final class TerminalTextView: NSTextView {
     }
 
     private func escapeSequence(for event: NSEvent) -> String? {
-        let option = event.modifierFlags.contains(.option)
-        switch event.keyCode {
-        case 36, 76: return "\r"
-        case 48: return event.modifierFlags.contains(.shift) ? "\u{1B}[Z" : "\t"
-        case 51: return "\u{7F}"
-        case 53: return "\u{1B}"
-        case 114: return "\u{1B}[2~"
-        case 117: return "\u{1B}[3~"
-        case 123: return option ? "\u{1B}b" : "\u{1B}[D"
-        case 124: return option ? "\u{1B}f" : "\u{1B}[C"
-        case 125: return "\u{1B}[B"
-        case 126: return "\u{1B}[A"
-        case 115: return "\u{1B}[H"
-        case 119: return "\u{1B}[F"
-        case 116: return "\u{1B}[5~"
-        case 121: return "\u{1B}[6~"
-        default: return nil
+        guard let session,
+              let data = session.encodedKeyEvent(
+                keyCode: event.keyCode,
+                modifiers: keyboardModifierCode(event.modifierFlags),
+                optionAsAlt: metaKeyEnabled,
+                repeatEvent: event.isARepeat
+            ) else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func mouseButton(for event: NSEvent) -> Int {
+        switch event.buttonNumber { case 1: return 1; case 2: return 2; default: return 0 }
+    }
+
+    private func sendMouse(
+        _ kind: TerminalMouseEventKind,
+        event: NSEvent,
+        button: Int = -1,
+        anyButtonPressed: Bool = false
+    ) {
+        guard let session else { return }
+        let point: NSPoint
+        if let clipView = enclosingScrollView?.contentView {
+            let p = clipView.convert(event.locationInWindow, from: nil)
+            point = NSPoint(x: p.x - clipView.bounds.minX, y: p.y - clipView.bounds.minY)
+        } else {
+            point = convert(event.locationInWindow, from: nil)
         }
+        let characterWidth = max(1, terminalAppearance?.characterWidth ?? 8)
+        let lineHeight = max(1, terminalAppearance?.lineHeight ?? 16)
+        let column = Int(floor((point.x - terminalGridInset) / characterWidth)) + 1
+        let row = Int(floor((point.y - terminalGridInset) / lineHeight)) + 1
+        session.sendMouse(
+            kind: kind,
+            button: button,
+            column: min(max(1, column), Int(session.columns)),
+            row: min(max(1, row), Int(session.rows)),
+            modifiers: mouseModifierCode(event.modifierFlags),
+            anyButtonPressed: anyButtonPressed
+        )
+    }
+
+    private func mouseModifierCode(_ flags: NSEvent.ModifierFlags) -> Int {
+        var code = 0
+        if flags.contains(.shift) { code |= 1 }
+        if flags.contains(.control) { code |= 2 }
+        if flags.contains(.option) { code |= 4 }
+        if flags.contains(.command) { code |= 8 }
+        return code
+    }
+
+    private func keyboardModifierCode(_ flags: NSEvent.ModifierFlags) -> UInt16 {
+        var code: UInt16 = 0
+        if flags.contains(.shift) { code |= 1 }
+        if flags.contains(.control) { code |= 2 }
+        if flags.contains(.option) && metaKeyEnabled { code |= 4 }
+        if flags.contains(.command) { code |= 8 }
+        return code
     }
 
     private func nsColor(for color: TerminalColor, fallback: NSColor) -> NSColor {
         switch color {
-        case .default:
-            return fallback
+        case .default: return fallback
         case .rgb(let red, let green, let blue):
-            return NSColor(
-                calibratedRed: CGFloat(red) / 255,
+            if let cached = cachedNSColors[color] { return cached }
+            let value = NSColor(
+                srgbRed: CGFloat(red) / 255,
                 green: CGFloat(green) / 255,
                 blue: CGFloat(blue) / 255,
                 alpha: 1
             )
+            cachedNSColors[color] = value
+            return value
         case .ansi(let index):
+            if cachedPaletteColors.indices.contains(index) { return cachedPaletteColors[index] }
             return ansiColor(index)
         }
     }
@@ -596,35 +1040,33 @@ private final class TerminalTextView: NSTextView {
             return cachedANSIColors[index]
         }
         let palette: [NSColor] = [
-            NSColor(calibratedRed: 0.12, green: 0.12, blue: 0.12, alpha: 1),
-            NSColor(calibratedRed: 0.92, green: 0.28, blue: 0.28, alpha: 1),
-            NSColor(calibratedRed: 0.34, green: 0.78, blue: 0.42, alpha: 1),
-            NSColor(calibratedRed: 0.92, green: 0.72, blue: 0.28, alpha: 1),
-            NSColor(calibratedRed: 0.36, green: 0.60, blue: 0.96, alpha: 1),
-            NSColor(calibratedRed: 0.72, green: 0.46, blue: 0.86, alpha: 1),
-            NSColor(calibratedRed: 0.28, green: 0.78, blue: 0.78, alpha: 1),
-            NSColor(calibratedRed: 0.86, green: 0.86, blue: 0.86, alpha: 1),
-            NSColor(calibratedRed: 0.40, green: 0.40, blue: 0.40, alpha: 1),
-            NSColor(calibratedRed: 1.00, green: 0.40, blue: 0.40, alpha: 1),
-            NSColor(calibratedRed: 0.46, green: 0.92, blue: 0.54, alpha: 1),
-            NSColor(calibratedRed: 1.00, green: 0.82, blue: 0.38, alpha: 1),
-            NSColor(calibratedRed: 0.52, green: 0.70, blue: 1.00, alpha: 1),
-            NSColor(calibratedRed: 0.86, green: 0.58, blue: 1.00, alpha: 1),
-            NSColor(calibratedRed: 0.38, green: 0.92, blue: 0.92, alpha: 1),
+            NSColor(srgbRed: 0.12, green: 0.12, blue: 0.12, alpha: 1),
+            NSColor(srgbRed: 0.92, green: 0.28, blue: 0.28, alpha: 1),
+            NSColor(srgbRed: 0.34, green: 0.78, blue: 0.42, alpha: 1),
+            NSColor(srgbRed: 0.92, green: 0.72, blue: 0.28, alpha: 1),
+            NSColor(srgbRed: 0.36, green: 0.60, blue: 0.96, alpha: 1),
+            NSColor(srgbRed: 0.72, green: 0.46, blue: 0.86, alpha: 1),
+            NSColor(srgbRed: 0.28, green: 0.78, blue: 0.78, alpha: 1),
+            NSColor(srgbRed: 0.86, green: 0.86, blue: 0.86, alpha: 1),
+            NSColor(srgbRed: 0.40, green: 0.40, blue: 0.40, alpha: 1),
+            NSColor(srgbRed: 1.00, green: 0.40, blue: 0.40, alpha: 1),
+            NSColor(srgbRed: 0.46, green: 0.92, blue: 0.54, alpha: 1),
+            NSColor(srgbRed: 1.00, green: 0.82, blue: 0.38, alpha: 1),
+            NSColor(srgbRed: 0.52, green: 0.70, blue: 1.00, alpha: 1),
+            NSColor(srgbRed: 0.86, green: 0.58, blue: 1.00, alpha: 1),
+            NSColor(srgbRed: 0.38, green: 0.92, blue: 0.92, alpha: 1),
             NSColor.white
         ]
         if index < palette.count { return palette[max(index, 0)] }
         if index >= 232 && index <= 255 {
             let value = CGFloat(8 + (index - 232) * 10) / 255
-            return NSColor(calibratedRed: value, green: value, blue: value, alpha: 1)
+            return NSColor(srgbRed: value, green: value, blue: value, alpha: 1)
         }
         let colorIndex = max(0, min(215, index - 16))
         let red = colorIndex / 36
         let green = (colorIndex / 6) % 6
         let blue = colorIndex % 6
-        func channel(_ value: Int) -> CGFloat {
-            value == 0 ? 0 : CGFloat(55 + value * 40) / 255
-        }
-        return NSColor(calibratedRed: channel(red), green: channel(green), blue: channel(blue), alpha: 1)
+        func channel(_ value: Int) -> CGFloat { value == 0 ? 0 : CGFloat(55 + value * 40) / 255 }
+        return NSColor(srgbRed: channel(red), green: channel(green), blue: channel(blue), alpha: 1)
     }
 }

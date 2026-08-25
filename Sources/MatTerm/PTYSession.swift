@@ -11,30 +11,35 @@ final class TerminalSession: ObservableObject, Identifiable {
     @Published private(set) var title: String
     @Published private(set) var workingDirectory: String
     @Published private(set) var displayRevision: UInt64 = 0
-    private(set) var displayRuns: [TerminalTextRun] = []
     @Published private(set) var focusRevision = 0
+    @Published private(set) var applicationCursorKeys = false
+    @Published private(set) var mouseTracking: TerminalMouseTracking = .off
+    @Published private(set) var mouseEncoding: TerminalMouseEncoding = .x10
+    @Published private(set) var focusReporting = false
 
+    private let terminalEngine: GhosttyTerminalEngine
     private var process: PTYProcess?
-    private var outputProcessor = ANSIProcessor()
-    private var textBuffer = TerminalTextBuffer()
     private var hasStarted = false
     private var activeGeneration: UUID?
     private var requestedColumns: UInt16 = 120
     private var requestedRows: UInt16 = 36
-    private var bracketedPasteEnabled = false
+    private var colorConfiguration: TerminalColorConfiguration?
     private var pendingOutput = Data()
     private var outputFlushScheduled = false
-    private var hasReceivedVisibleOutput = false
     private var workingDirectoryTimer: Timer?
     private let outputFlushDelay: TimeInterval = 1.0 / 60.0
 
     init(kind: SessionKind) {
         self.kind = kind
+        terminalEngine = GhosttyTerminalEngine(columns: requestedColumns, rows: requestedRows)
         workingDirectory = "~"
         title = kind.title
     }
 
     var iconName: String { kind.iconName }
+    var columns: UInt16 { requestedColumns }
+    var rows: UInt16 { requestedRows }
+    var hasScrollback: Bool { terminalEngine.scrollbackRows > 0 }
 
     func start() {
         guard !hasStarted else { return }
@@ -90,14 +95,14 @@ final class TerminalSession: ObservableObject, Identifiable {
 
     func restart() {
         stop()
-        outputProcessor.reset()
-        textBuffer.clear()
-        displayRuns = []
+        terminalEngine.reset()
+        if let colorConfiguration {
+            terminalEngine.configureColors(colorConfiguration)
+        }
         displayRevision &+= 1
         workingDirectory = "~"
         title = kind.title
-        hasReceivedVisibleOutput = false
-        bracketedPasteEnabled = false
+        synchronizeTerminalState()
         status = .connecting
         hasStarted = false
         start()
@@ -107,64 +112,103 @@ final class TerminalSession: ObservableObject, Identifiable {
         process?.send(text)
     }
 
+    @discardableResult
+    func sendKeyEvent(
+        keyCode: UInt16,
+        modifiers: UInt16,
+        optionAsAlt: Bool,
+        repeatEvent: Bool = false
+    ) -> Bool {
+        guard let data = encodedKeyEvent(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            optionAsAlt: optionAsAlt,
+            repeatEvent: repeatEvent
+        ) else { return false }
+        process?.send(data)
+        return true
+    }
+
+    func encodedKeyEvent(
+        keyCode: UInt16,
+        modifiers: UInt16,
+        optionAsAlt: Bool,
+        repeatEvent: Bool = false
+    ) -> Data? {
+        terminalEngine.encodeKey(
+            keyCode: keyCode,
+            modifiers: modifiers,
+            optionAsAlt: optionAsAlt,
+            repeatEvent: repeatEvent
+        )
+    }
+
     func paste(_ text: String) {
-        guard bracketedPasteEnabled else {
-            process?.send(text)
-            return
-        }
-        process?.send("\u{1B}[200~" + text + "\u{1B}[201~")
+        guard let data = terminalEngine.encodePaste(text) else { return }
+        process?.send(data)
     }
 
     func requestFocus() {
         focusRevision &+= 1
     }
 
+    func sendFocusEvent(_ focused: Bool) {
+        guard terminalEngine.focusReporting else { return }
+        guard let data = terminalEngine.encodeFocusEvent(focused: focused) else { return }
+        process?.send(data)
+    }
+
     func clearDisplay() {
-        outputProcessor.reset()
-        textBuffer.clear()
-        displayRuns = []
+        terminalEngine.write(Data("\u{1B}[2J\u{1B}[H".utf8))
+        displayRevision &+= 1
+    }
+
+    func scrollViewport(delta: Int) {
+        terminalEngine.scrollViewport(delta: delta)
+        displayRevision &+= 1
+    }
+
+    func scrollViewport(row: Int) {
+        terminalEngine.scrollViewport(row: row)
+        displayRevision &+= 1
+    }
+
+    func scrollToBottom() {
+        terminalEngine.scrollToBottom()
         displayRevision &+= 1
     }
 
     func resize(columns: UInt16, rows: UInt16) {
         requestedColumns = max(2, columns)
         requestedRows = max(2, rows)
-        textBuffer.resize(columns: Int(columns))
+        terminalEngine.resize(columns: requestedColumns, rows: requestedRows)
+        synchronizeTerminalState()
         process?.resize(columns: columns, rows: rows)
     }
 
+    func configureColors(_ configuration: TerminalColorConfiguration) {
+        guard colorConfiguration?.id != configuration.id else { return }
+        colorConfiguration = configuration
+        terminalEngine.configureColors(configuration)
+        displayRevision &+= 1
+    }
+
     private func receive(_ data: Data) {
-        let result = outputProcessor.consume(data)
-        for segment in result.segments {
-            switch segment {
-            case .text(let text):
-                textBuffer.consume(text)
-            case .action(let action):
-                textBuffer.apply(action)
-                if case .setWorkingDirectory(let path) = action {
-                    updateWorkingDirectory(path)
-                }
-                if case .setBracketedPaste(let enabled) = action {
-                    bracketedPasteEnabled = enabled
-                }
-                respondIfNeeded(to: action)
-            }
-        }
-
-        if !hasReceivedVisibleOutput {
-            textBuffer.removeLeadingBlankLines()
-            hasReceivedVisibleOutput = textBuffer.hasVisibleCharacters
-        }
-
-        let maximumCharacters = 240_000
-        textBuffer.trimToCharacterLimit(maximumCharacters)
-        displayRuns = textBuffer.runs
+        terminalEngine.write(data)
+        let responses = terminalEngine.drainPTYOutput()
+        if !responses.isEmpty { process?.send(responses) }
+        synchronizeTerminalState()
         displayRevision &+= 1
     }
 
     // Kept for diagnostics and tests without forcing a full String allocation
     // on every PTY output batch.
-    var displayText: String { textBuffer.text }
+    var displayText: String { terminalEngine.visibleText }
+
+    // The renderer consumes Ghostty's cell snapshot. A terminal pane must
+    // never be laid out as a proportional text paragraph: tmux and full-screen
+    // programs address an exact row/column grid.
+    var displayGrid: TerminalGridSnapshot { terminalEngine.snapshot() }
 
     private func startWorkingDirectoryPolling() {
         guard case .local = kind else { return }
@@ -234,18 +278,43 @@ final class TerminalSession: ObservableObject, Identifiable {
         }
     }
 
-    private func respondIfNeeded(to action: TerminalControlAction) {
-        switch action {
-        case .requestCursorPosition:
-            let position = textBuffer.cursorPosition
-            process?.send("\u{1B}[" + String(position.row) + ";" + String(position.column) + "R")
-        case .requestDeviceAttributes:
-            process?.send("\u{1B}[?1;2c")
-        case .requestStatus(5):
-            process?.send("\u{1B}[0n")
-        default:
-            break
+    private func synchronizeTerminalState() {
+        applicationCursorKeys = terminalEngine.applicationCursorKeys
+        mouseTracking = terminalEngine.mouseTracking
+        mouseEncoding = terminalEngine.mouseEncoding
+        focusReporting = terminalEngine.focusReporting
+
+        if case .local = kind, let path = terminalEngine.workingDirectory {
+            let decodedPath: String
+            if let url = URL(string: path), url.scheme == "file" {
+                decodedPath = url.path.removingPercentEncoding ?? url.path
+            } else {
+                decodedPath = path.removingPercentEncoding ?? path
+            }
+            if !decodedPath.isEmpty { updateWorkingDirectory(decodedPath) }
         }
+    }
+
+    func sendMouse(
+        kind: TerminalMouseEventKind,
+        button: Int = -1,
+        column: Int,
+        row: Int,
+        modifiers: Int = 0,
+        anyButtonPressed: Bool = false
+    ) {
+        guard mouseTracking != .off else { return }
+        let clampedColumn = max(1, column)
+        let clampedRow = max(1, row)
+        guard let data = terminalEngine.encodeMouse(
+            kind: kind,
+            button: button,
+            column: clampedColumn,
+            row: clampedRow,
+            modifiers: UInt16(clamping: modifiers),
+            anyButtonPressed: anyButtonPressed
+        ) else { return }
+        process?.send(data)
     }
 }
 
@@ -382,6 +451,10 @@ private final class PTYProcess: @unchecked Sendable {
 
     func send(_ text: String) {
         guard let data = text.data(using: .utf8) else { return }
+        send(data)
+    }
+
+    func send(_ data: Data) {
         writeQueue.async { [weak self] in
             self?.writeData(data)
         }

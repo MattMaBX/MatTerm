@@ -12,7 +12,12 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "MatTerm",
+            dependencies: ["GhosttyVt"],
             path: "Sources/MatTerm"
+        ),
+        .binaryTarget(
+            name: "GhosttyVt",
+            path: "Vendor/GhosttyVT/ghostty-vt.xcframework"
         )
     ]
 )

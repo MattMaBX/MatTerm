@@ -2,6 +2,7 @@ import Foundation
 import Combine
 import AppKit
 import SwiftUI
+import GhosttyVt
 
 enum SessionKind: Hashable {
     case local
@@ -74,6 +75,51 @@ struct TerminalTheme: CaseIterable, Hashable, Identifiable {
     var appKitForeground: NSColor { NSColor(hex: foregroundHex) }
     var appKitCursor: NSColor { NSColor(hex: cursorHex) }
     var appKitANSIColors: [NSColor] { ansiHexColors.map(NSColor.init(hex:)) }
+
+    var ghosttyColorConfiguration: TerminalColorConfiguration {
+        func rgb(_ color: NSColor) -> GhosttyColorRgb {
+            let color = color.usingColorSpace(.sRGB) ?? color
+            return GhosttyColorRgb(
+                r: UInt8(clamping: Int((color.redComponent * 255).rounded())),
+                g: UInt8(clamping: Int((color.greenComponent * 255).rounded())),
+                b: UInt8(clamping: Int((color.blueComponent * 255).rounded()))
+            )
+        }
+
+        let base = appKitANSIColors.map(rgb)
+        // The 216-color cube and grayscale ramp are part of Ghostty's color
+        // semantics. In particular, it uses CIELAB interpolation rather than
+        // the old xterm RGB formula. Generate the palette through the same C
+        // API that resolves palette colors inside the terminal.
+        var palette = Array(
+            repeating: GhosttyColorRgb(r: 0, g: 0, b: 0),
+            count: 256
+        )
+        palette.withUnsafeMutableBufferPointer { buffer in
+            guard let pointer = buffer.baseAddress else { return }
+            ghostty_color_palette_default(pointer)
+            for index in 0..<min(16, base.count) {
+                pointer[index] = base[index]
+            }
+            var background = rgb(appKitBackground)
+            var foreground = rgb(appKitForeground)
+            ghostty_color_palette_generate(
+                pointer,
+                nil,
+                &background,
+                &foreground,
+                true,
+                pointer
+            )
+        }
+        return TerminalColorConfiguration(
+            id: id,
+            foreground: rgb(appKitForeground),
+            background: rgb(appKitBackground),
+            cursor: rgb(appKitCursor),
+            palette: palette
+        )
+    }
 }
 
 private extension NSColor {
@@ -81,11 +127,11 @@ private extension NSColor {
         let value = hex.trimmingCharacters(in: .whitespacesAndNewlines)
             .trimmingCharacters(in: CharacterSet(charactersIn: "#"))
         guard value.count == 6, let rgb = UInt64(value, radix: 16) else {
-            self.init(calibratedWhite: 0, alpha: 1)
+            self.init(srgbRed: 0, green: 0, blue: 0, alpha: 1)
             return
         }
         self.init(
-            calibratedRed: CGFloat((rgb >> 16) & 0xFF) / 255,
+            srgbRed: CGFloat((rgb >> 16) & 0xFF) / 255,
             green: CGFloat((rgb >> 8) & 0xFF) / 255,
             blue: CGFloat(rgb & 0xFF) / 255,
             alpha: 1
@@ -96,10 +142,16 @@ private extension NSColor {
 @MainActor
 final class TerminalAppearance: ObservableObject {
     @Published var fontFamily: String {
-        didSet { defaults.set(fontFamily, forKey: Keys.fontFamily) }
+        didSet {
+            defaults.set(fontFamily, forKey: Keys.fontFamily)
+            invalidateFontCache()
+        }
     }
     @Published var fontSize: Double {
-        didSet { defaults.set(fontSize, forKey: Keys.fontSize) }
+        didSet {
+            defaults.set(fontSize, forKey: Keys.fontSize)
+            invalidateFontCache()
+        }
     }
     @Published var lineSpacing: Double {
         didSet { defaults.set(lineSpacing, forKey: Keys.lineSpacing) }
@@ -118,6 +170,14 @@ final class TerminalAppearance: ObservableObject {
     }
 
     private let defaults = UserDefaults.standard
+    private var cachedFontFamily = ""
+    private var cachedFontSize: CGFloat = -1
+    private var cachedRegularFont: NSFont?
+    private var cachedBoldFont: NSFont?
+    private var cachedItalicFont: NSFont?
+    private var cachedBoldItalicFont: NSFont?
+    private var cachedCharacterWidth: CGFloat?
+    private var cachedFontLineHeight: CGFloat?
 
     private enum Keys {
         static let fontFamily = "terminal.fontFamily"
@@ -144,9 +204,14 @@ final class TerminalAppearance: ObservableObject {
         theme = TerminalTheme.allCases.first { $0.id == savedThemeID }
             ?? TerminalTheme.allCases[0]
         let savedOpacity = defaults.object(forKey: Keys.backgroundOpacity) as? Double
-        backgroundOpacity = min(max(savedOpacity ?? 0.45, 0), 1)
         let savedBlur = defaults.object(forKey: Keys.backgroundBlur) as? Double
-        backgroundBlur = min(max(savedBlur ?? 12, 0), 24)
+        // The original translucent defaults let the desktop and other windows
+        // bleed through the terminal, which also made every ANSI color look
+        // gray. Keep the controls, but start new/migrated profiles with a
+        // crisp terminal surface.
+        let isLegacyDefault = savedOpacity == 0.45 && savedBlur == 12
+        backgroundOpacity = min(max(isLegacyDefault ? 1 : (savedOpacity ?? 1), 0), 1)
+        backgroundBlur = min(max(isLegacyDefault ? 0 : (savedBlur ?? 0), 0), 24)
         cursorBlinkEnabled = defaults.object(forKey: Keys.cursorBlinkEnabled) as? Bool ?? true
     }
 
@@ -166,7 +231,22 @@ final class TerminalAppearance: ObservableObject {
             ?? "Menlo"
     }
 
-    func font(ofSize size: CGFloat, bold: Bool = false) -> NSFont {
+    func font(ofSize size: CGFloat, bold: Bool = false, italic: Bool = false) -> NSFont {
+        if size == CGFloat(fontSize) {
+            if cachedFontFamily != fontFamily || cachedFontSize != size {
+                rebuildFontCache(for: size)
+            }
+            if italic {
+                return bold ? cachedBoldItalicFont! : cachedItalicFont!
+            }
+            return bold ? cachedBoldFont! : cachedRegularFont!
+        }
+
+        let base = makeFont(ofSize: size, bold: bold)
+        return italic ? NSFontManager.shared.convert(base, toHaveTrait: .italicFontMask) : base
+    }
+
+    private func makeFont(ofSize size: CGFloat, bold: Bool) -> NSFont {
         let cascadeFonts = ["Maple Mono NF CN", "SF Mono", "Menlo", "Monaco"]
             .filter { $0 != fontFamily && Self.availableMonospacedFontFamilies.contains($0) }
             .map { NSFontDescriptor(name: $0, size: size) }
@@ -178,10 +258,37 @@ final class TerminalAppearance: ObservableObject {
         return NSFontManager.shared.convert(base, toHaveTrait: .boldFontMask)
     }
 
+    private func rebuildFontCache(for size: CGFloat) {
+        let regular = makeFont(ofSize: size, bold: false)
+        let bold = makeFont(ofSize: size, bold: true)
+        cachedFontFamily = fontFamily
+        cachedFontSize = size
+        cachedRegularFont = regular
+        cachedBoldFont = bold
+        cachedItalicFont = NSFontManager.shared.convert(regular, toHaveTrait: .italicFontMask)
+        cachedBoldItalicFont = NSFontManager.shared.convert(bold, toHaveTrait: .italicFontMask)
+        cachedCharacterWidth = nil
+        cachedFontLineHeight = nil
+    }
+
+    private func invalidateFontCache() {
+        cachedFontFamily = ""
+        cachedFontSize = -1
+        cachedRegularFont = nil
+        cachedBoldFont = nil
+        cachedItalicFont = nil
+        cachedBoldItalicFont = nil
+        cachedCharacterWidth = nil
+        cachedFontLineHeight = nil
+    }
+
     var characterWidth: CGFloat {
+        if let cachedCharacterWidth { return cachedCharacterWidth }
         let terminalFont = font(ofSize: CGFloat(fontSize))
         let asciiCellWidth = ("0" as NSString).size(withAttributes: [.font: terminalFont]).width
-        return max(1, asciiCellWidth)
+        let width = max(1, asciiCellWidth)
+        cachedCharacterWidth = width
+        return width
     }
 
     var lineHeight: CGFloat {
@@ -189,8 +296,78 @@ final class TerminalAppearance: ObservableObject {
     }
 
     var fontLineHeight: CGFloat {
+        if let cachedFontLineHeight { return cachedFontLineHeight }
         let font = font(ofSize: CGFloat(fontSize))
-        return max(1, ceil(font.ascender - font.descender + font.leading))
+        let height = max(1, ceil(font.ascender - font.descender + font.leading))
+        cachedFontLineHeight = height
+        return height
+    }
+
+    var isDarkTheme: Bool {
+        guard let color = theme.appKitBackground.usingColorSpace(.sRGB) else {
+            return true
+        }
+        let luminance = (0.2126 * color.redComponent)
+            + (0.7152 * color.greenComponent)
+            + (0.0722 * color.blueComponent)
+        return luminance < 0.58
+    }
+
+    // Keep the theme tint and its transparency as one composited color so
+    // the terminal backdrop and native materials respond consistently.
+    var effectiveBackgroundColor: NSColor {
+        theme.appKitBackground.withAlphaComponent(CGFloat(backgroundOpacity))
+    }
+
+    var effectiveBackground: Color {
+        Color(nsColor: effectiveBackgroundColor)
+    }
+
+    func readableMutedColor(_ color: NSColor) -> NSColor {
+        let background = theme.appKitBackground
+        guard contrastRatio(color, against: background) < 2.2 else { return color }
+
+        let foreground = theme.appKitForeground
+        var candidate = mix(background, foreground, amount: 0.46)
+        for amount in stride(from: 0.46, through: 0.72, by: 0.04) {
+            candidate = mix(background, foreground, amount: amount)
+            if contrastRatio(candidate, against: background) >= 2.2 {
+                break
+            }
+        }
+        return candidate
+    }
+
+    private func mix(_ first: NSColor, _ second: NSColor, amount: CGFloat) -> NSColor {
+        guard let first = first.usingColorSpace(.sRGB),
+              let second = second.usingColorSpace(.sRGB) else {
+            return second
+        }
+        let amount = min(max(amount, 0), 1)
+        return NSColor(
+            srgbRed: first.redComponent + (second.redComponent - first.redComponent) * amount,
+            green: first.greenComponent + (second.greenComponent - first.greenComponent) * amount,
+            blue: first.blueComponent + (second.blueComponent - first.blueComponent) * amount,
+            alpha: 1
+        )
+    }
+
+    private func contrastRatio(_ first: NSColor, against second: NSColor) -> CGFloat {
+        func luminance(of color: NSColor) -> CGFloat {
+            guard let color = color.usingColorSpace(.sRGB) else { return 0 }
+            func linearize(_ channel: CGFloat) -> CGFloat {
+                channel <= 0.03928
+                    ? channel / 12.92
+                    : pow((channel + 0.055) / 1.055, 2.4)
+            }
+            return (0.2126 * linearize(color.redComponent))
+                + (0.7152 * linearize(color.greenComponent))
+                + (0.0722 * linearize(color.blueComponent))
+        }
+
+        let brighter = max(luminance(of: first), luminance(of: second))
+        let darker = min(luminance(of: first), luminance(of: second))
+        return (brighter + 0.05) / (darker + 0.05)
     }
 
     func increaseFontSize() {
@@ -388,6 +565,9 @@ final class AppState: ObservableObject {
     @Published var selectedWorkspaceID: UUID?
     @Published var isSSHProfileSelectorPresented = false
     private var workspaceSubscriptions: [UUID: AnyCancellable] = [:]
+    private var mainWindowOpener: (() -> Void)?
+    private var cachedMainWindow: NSWindow?
+    private var mainWindowCloseObserver: NSObjectProtocol?
 
     init() {
         openLocalSession()
@@ -414,17 +594,27 @@ final class AppState: ObservableObject {
         isSSHProfileSelectorPresented = true
     }
 
+    func registerMainWindowOpener(_ opener: @escaping () -> Void) {
+        mainWindowOpener = opener
+    }
+
     func toggleMainWindow() {
         let settingsWindowIdentifier = "com_apple_SwiftUI_Settings_window"
         let appWindows = NSApp.windows.filter {
             $0.identifier?.rawValue != settingsWindowIdentifier
         }
-        guard let window = appWindows.first(where: { $0.title == "MatTerm" })
-            ?? appWindows.first(where: { $0.isMainWindow }) else {
+        let discoveredWindow = appWindows.first(where: {
+            $0.identifier?.rawValue == "com.matterm.main-window"
+        }) ?? appWindows.first(where: { $0.title == "MatTerm" })
+            ?? appWindows.first(where: { $0.isMainWindow })
+        guard let window = cachedMainWindow ?? discoveredWindow else {
+            NSApp.activate(ignoringOtherApps: true)
+            mainWindowOpener?()
             return
         }
+        trackMainWindow(window)
 
-        if window.isVisible && NSApp.isActive {
+        if window.isVisible && NSApp.isActive && window.isKeyWindow {
             window.orderOut(nil)
             return
         }
@@ -441,8 +631,31 @@ final class AppState: ObservableObject {
             move(window, to: targetScreen, around: mouseLocation)
         }
 
+        // A hidden regular app must be explicitly unhidden before its window
+        // can become key again, especially after the shortcut came from another app.
+        NSApp.setActivationPolicy(.regular)
+        NSApp.unhide(nil)
         NSApp.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
         window.makeKeyAndOrderFront(nil)
+    }
+
+    private func trackMainWindow(_ window: NSWindow) {
+        guard cachedMainWindow !== window else { return }
+        if let mainWindowCloseObserver {
+            NotificationCenter.default.removeObserver(mainWindowCloseObserver)
+        }
+        cachedMainWindow = window
+        mainWindowCloseObserver = NotificationCenter.default.addObserver(
+            forName: NSWindow.willCloseNotification,
+            object: window,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.cachedMainWindow = nil
+                self?.mainWindowCloseObserver = nil
+            }
+        }
     }
 
     private func move(_ window: NSWindow, to screen: NSScreen, around point: NSPoint) {

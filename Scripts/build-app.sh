@@ -35,6 +35,9 @@ if [[ "$phase" == "all" || "$phase" == "merge" ]]; then
     rm -rf "$app_path"
     mkdir -p "$app_path/Contents/MacOS" "$app_path/Contents/Resources"
     lipo -create "$arm64_binary" "$x86_64_binary" -output "$app_path/Contents/MacOS/MatTerm"
+    # Release artifacts must not expose local source/build paths through
+    # compiler debug information. Strip those symbols before signing.
+    strip -S "$app_path/Contents/MacOS/MatTerm"
     cp "$project_root/Resources/Info.plist" "$app_path/Contents/Info.plist"
 fi
 if [[ "$phase" == "merge" ]]; then

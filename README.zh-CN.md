@@ -6,21 +6,25 @@
 
 MatTerm 面向需要频繁使用本地终端和 SSH 的 macOS 用户。它使用原生 SwiftUI 和 AppKit 界面、系统 PTY 以及系统 OpenSSH 客户端，保持响应流畅、资源占用较低，并与 macOS 的窗口和输入体系保持一致。
 
+当前版本：**v0.1.1**
+
 ## 功能
 
 - 基于真实 PTY 的本地终端会话。
 - 从 `~/.ssh/config` 导入并同步 SSH 配置。
 - 在 App 中新增或编辑的配置会写回本机 OpenSSH 配置文件。
 - 支持 ANSI 颜色、256 色和 24 位真彩色渲染。
+- 基于 Ghostty VT 核心实现终端解析、渲染、滚动和鼠标跟踪。
+- 普通终端模式支持原生回滚滚动和可见滚动条。
 - 内置 Tabby 社区配色方案。
 - 支持设置字体、字号、额外行间距、光标闪烁、背景透明度和模糊程度。
-- 支持传统标签栏和紧凑标签栏。
+- 使用自适应标签宽度的紧凑标签栏，并将新建标签按钮独立放置。
 - 支持在设置中修改 SSH 配置选择器和分屏快捷键。
 - 支持向左、向右、向上、向下分屏，每个子终端独立聚焦并独立显示光标。
 - 记忆窗口大小和位置，支持窗口置顶以及全局显示/隐藏快捷键。
 - 支持英文和简体中文界面。
 
-首个发布版本暂不包含端口转发；分屏目前采用方向性子窗口工作流。
+v0.1.1 暂不包含端口转发；分屏目前采用方向性子窗口工作流。
 
 ## 系统要求
 
@@ -39,9 +43,17 @@ cd MatTerm
 open Build/MatTerm.app
 ```
 
-构建脚本会先执行终端解析、PTY、性能、外观和 App 级检查，分别编译两种 CPU 架构，生成标准 macOS 图标，并对 `Build/MatTerm.app` 进行临时签名。`Scripts/package-app.sh` 会在 `Artifacts/` 中生成 universal ZIP。
+构建脚本会先执行 Ghostty VT 核心、PTY、多路复用、外观和 App 级检查，分别编译两种 CPU 架构，生成标准 macOS 图标，并对 `Build/MatTerm.app` 进行临时签名。`Scripts/package-app.sh` 会在 `Artifacts/` 中生成 universal ZIP。
 
-GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.1.0` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
+GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.1.1` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
+
+### v0.1.1
+
+- 在保持现有 MatTerm 界面的同时，使用 Ghostty VT 核心重写终端视口逻辑。
+- 修复普通终端滚轮回滚，并增加原生可见滚动条。
+- 保持 tmux、Vim 和 screen 的鼠标事件由终端程序接收。
+- 优化 ANSI、256 色和真彩色渲染，消除背景透出造成的竖线伪影。
+- 减少滚动和分屏交互时的重复重绘。
 
 如果只需要编译：
 

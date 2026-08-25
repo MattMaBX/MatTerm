@@ -1,7 +1,46 @@
+import AppKit
 import SwiftUI
+
+@MainActor
+final class MatTermAppDelegate: NSObject, NSApplicationDelegate {
+    var openMainWindow: (() -> Void)?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        // The main window can be hidden without making MatTerm an agent app.
+        // Keep its Dock presence and event loop alive for the global shortcut.
+        NSApp.setActivationPolicy(.regular)
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
+    func applicationShouldHandleReopen(
+        _ sender: NSApplication,
+        hasVisibleWindows flag: Bool
+    ) -> Bool {
+        sender.setActivationPolicy(.regular)
+        sender.unhide(nil)
+        guard let window = sender.windows.first(where: {
+            $0.identifier?.rawValue == "com.matterm.main-window"
+        }) else {
+            sender.activate(ignoringOtherApps: true)
+            openMainWindow?()
+            return false
+        }
+
+        window.collectionBehavior.insert(.moveToActiveSpace)
+        sender.activate(ignoringOtherApps: true)
+        window.orderFrontRegardless()
+        window.makeKeyAndOrderFront(nil)
+        return false
+    }
+}
 
 @main
 struct MatTermApp: App {
+    @NSApplicationDelegateAdaptor(MatTermAppDelegate.self) private var appDelegate
+    @Environment(\.openWindow) private var openWindow
     @StateObject private var appState = AppState()
     @StateObject private var profileStore = SSHProfileStore()
     @StateObject private var terminalAppearance = TerminalAppearance()
@@ -9,12 +48,19 @@ struct MatTermApp: App {
     @StateObject private var shortcutStore = ShortcutStore()
 
     var body: some Scene {
-        WindowGroup {
+        Window("MatTerm", id: "main") {
             MainView(
                 appState: appState,
-                profileStore: profileStore,
-                initialDisplayMode: preferences.activeDisplayMode
+                profileStore: profileStore
             )
+                .onAppear {
+                    appDelegate.openMainWindow = {
+                        openWindow(id: "main")
+                    }
+                    appState.registerMainWindowOpener {
+                        openWindow(id: "main")
+                    }
+                }
                 .environmentObject(terminalAppearance)
                 .environmentObject(preferences)
                 .environmentObject(shortcutStore)

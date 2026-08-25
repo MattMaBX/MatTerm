@@ -70,6 +70,33 @@ enum AppPTYCheck {
             session.displayText.contains("matterm-input-你好")
         }
 
+        // Mouse protocols can overlap while tmux/screen switch modes. Turning
+        // off 1002 must not disable 1000 while it is still active.
+        session.send("printf '\\033[?1000h\\033[?1002h\\033[?1002l'\r")
+        try await waitUntil(timeoutMilliseconds: 5_000) {
+            session.mouseTracking == .normal
+        }
+        session.send("printf '\\033[?1000l'\r")
+        try await waitUntil(timeoutMilliseconds: 5_000) {
+            session.mouseTracking == .off
+        }
+
+        // Mouse encodings are independent DEC modes. Disabling SGR must
+        // restore an active UTF-8 encoding instead of silently falling back
+        // to legacy X10 bytes.
+        session.send("printf '\\033[?1005h\\033[?1006h'\r")
+        try await waitUntil(timeoutMilliseconds: 5_000) {
+            session.mouseEncoding == .sgr
+        }
+        session.send("printf '\\033[?1006l'\r")
+        try await waitUntil(timeoutMilliseconds: 5_000) {
+            session.mouseEncoding == .utf8
+        }
+        session.send("printf '\\033[?1005l'\r")
+        try await waitUntil(timeoutMilliseconds: 5_000) {
+            session.mouseEncoding == .x10
+        }
+
         session.resize(columns: 77, rows: 41)
         session.send("stty size\r")
         try await waitUntil(timeoutMilliseconds: 5_000) {
