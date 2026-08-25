@@ -139,6 +139,11 @@ private struct TerminalCellPosition: Equatable {
     let row: Int
 }
 
+private struct ResolvedTerminalColors {
+    let foreground: NSColor
+    let background: NSColor
+}
+
 private final class TerminalScrollView: NSScrollView {
     func updateTerminalMouseMode() {
         guard let grid = documentView as? TerminalGridView,
@@ -173,35 +178,13 @@ private final class TerminalScrollView: NSScrollView {
 
 private final class TerminalClipView: NSClipView {
     weak var terminalGridView: TerminalGridView?
-    private var boundsObserver: NSObjectProtocol?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
-        installBoundsObserver()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
-        installBoundsObserver()
-    }
-
-    private func installBoundsObserver() {
-        postsBoundsChangedNotifications = true
-        boundsObserver = NotificationCenter.default.addObserver(
-            forName: NSView.boundsDidChangeNotification,
-            object: self,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor [weak self] in
-                self?.terminalGridView?.scheduleNativeViewportUpdate()
-            }
-        }
-    }
-
-    deinit {
-        if let boundsObserver {
-            NotificationCenter.default.removeObserver(boundsObserver)
-        }
     }
 
     override var isFlipped: Bool { true }
@@ -368,6 +351,7 @@ private final class TerminalGridView: NSTextView {
     private var cachedANSIColors: [NSColor] = []
     private var cachedPaletteColors: [NSColor] = []
     private var cachedNSColors: [TerminalColor: NSColor] = [:]
+    private var cachedStyleColors: [TerminalTextStyle: ResolvedTerminalColors] = [:]
     private var synchronizingNativeViewport = false
     private var nativeViewportUpdateScheduled = false
     private var cursorBlinkTimer: Timer?
@@ -439,6 +423,7 @@ private final class TerminalGridView: NSTextView {
         cachedANSIColors = appearance.theme.appKitANSIColors
         cachedPaletteColors.removeAll(keepingCapacity: true)
         cachedNSColors.removeAll(keepingCapacity: true)
+        cachedStyleColors.removeAll(keepingCapacity: true)
         lastDisplayRevision = 0
         lastCursorBlinkOn = nil
         lastCursorBlinkEnabled = nil
@@ -461,11 +446,19 @@ private final class TerminalGridView: NSTextView {
         }
         let shouldFollowOutput = isNearBottom
         if contentChanged || fontChanged {
+            let previousSnapshot = snapshot
             snapshot = session.displayGrid
-            if let snapshot { updateRenderColors(snapshot) }
+            if let snapshot {
+                let colorsChanged = previousSnapshot.map {
+                    renderColorsChanged(from: $0, to: snapshot)
+                } ?? true
+                if colorsChanged {
+                    updateRenderColors(snapshot)
+                }
+            }
             updateDocumentFrame()
             synchronizeNativeViewport()
-            invalidateVisibleTerminalArea()
+            invalidateVisibleTerminalArea(previousSnapshot: previousSnapshot)
             if snapshot?.isAlternateScreen == true {
                 scrollDocumentToTop()
             } else if shouldFollowOutput {
@@ -583,14 +576,53 @@ private final class TerminalGridView: NSTextView {
         }
     }
 
-    private func invalidateVisibleTerminalArea() {
+    private func invalidateVisibleTerminalArea(previousSnapshot: TerminalGridSnapshot? = nil) {
         guard let clipView = enclosingScrollView?.contentView else {
             setNeedsDisplay(visibleRect)
             return
         }
         let rect = convert(clipView.bounds, from: clipView).intersection(bounds)
         guard !rect.isNull, !rect.isEmpty else { return }
-        setNeedsDisplay(rect)
+
+        // Native scrolling already moves the existing layer contents. When
+        // the viewport advances by a few rows, only the newly exposed band
+        // needs to be redrawn; repainting every cell in the pane here makes a
+        // high-resolution trackpad scroll spend most of its frame in text
+        // layout. Large jumps and normal terminal output still repaint the
+        // complete visible area.
+        guard let previousSnapshot,
+              let snapshot,
+              previousSnapshot.isAlternateScreen == snapshot.isAlternateScreen,
+              previousSnapshot.columns == snapshot.columns,
+              previousSnapshot.rows == snapshot.rows else {
+            setNeedsDisplay(rect)
+            return
+        }
+        let rowDelta = snapshot.screenTopIndex - previousSnapshot.screenTopIndex
+        let rowHeight = max(1, terminalAppearance?.lineHeight ?? 1)
+        guard rowDelta != 0, abs(rowDelta) < snapshot.rows else {
+            setNeedsDisplay(rect)
+            return
+        }
+
+        let extraRow = rowHeight
+        let exposedBand: NSRect
+        if rowDelta > 0 {
+            exposedBand = NSRect(
+                x: rect.minX,
+                y: rect.maxY - CGFloat(rowDelta) * rowHeight - extraRow,
+                width: rect.width,
+                height: CGFloat(rowDelta) * rowHeight + extraRow * 2
+            )
+        } else {
+            exposedBand = NSRect(
+                x: rect.minX,
+                y: rect.minY - extraRow,
+                width: rect.width,
+                height: CGFloat(-rowDelta) * rowHeight + extraRow * 2
+            )
+        }
+        setNeedsDisplay(exposedBand.intersection(rect))
     }
 
     private func resizeSessionToViewport() {
@@ -647,16 +679,13 @@ private final class TerminalGridView: NSTextView {
         guard firstRow <= lastRow else { return }
 
         NSGraphicsContext.saveGraphicsState()
-        // The terminal's default background is a real cell color. Paint it
-        // across the dirty region first so the app's sidebar/split hierarchy
-        // cannot bleed through the transparent document and form vertical
-        // divider artifacts while scrolling.
-        let defaultBackground = nsColor(
-            for: snapshot.defaultBackground,
-            fallback: appearance.theme.appKitBackground
-        )
-        defaultBackground.setFill()
-        drawRect.fill()
+        // A default terminal cell is transparent. The themed backdrop behind
+        // this document owns the opacity and blur; painting Ghostty's default
+        // background here would make the opacity slider appear ineffective.
+        // Clear the dirty pixels first so an old opaque backing-store sample
+        // cannot survive a scroll or an opacity change.
+        NSColor.clear.setFill()
+        drawRect.fill(using: .copy)
         for row in firstRow...lastRow {
             let line = snapshot.line(at: row)
             let y = terminalGridInset + CGFloat(row) * rowHeight
@@ -831,7 +860,10 @@ private final class TerminalGridView: NSTextView {
         for style: TerminalTextStyle,
         snapshot: TerminalGridSnapshot,
         appearance: TerminalAppearance
-    ) -> (foreground: NSColor, background: NSColor) {
+    ) -> ResolvedTerminalColors {
+        if let cached = cachedStyleColors[style] {
+            return cached
+        }
         let defaultForeground = nsColor(
             for: snapshot.defaultForeground,
             fallback: appearance.theme.appKitForeground
@@ -840,16 +872,20 @@ private final class TerminalGridView: NSTextView {
             for: snapshot.defaultBackground,
             fallback: appearance.theme.appKitBackground
         )
+        let resolved: ResolvedTerminalColors
         if style.inverse {
-            return (
-                nsColor(for: style.background, fallback: defaultBackground),
-                nsColor(for: style.foreground, fallback: defaultForeground)
+            resolved = ResolvedTerminalColors(
+                foreground: nsColor(for: style.background, fallback: defaultBackground),
+                background: nsColor(for: style.foreground, fallback: defaultForeground)
+            )
+        } else {
+            resolved = ResolvedTerminalColors(
+                foreground: nsColor(for: style.foreground, fallback: defaultForeground),
+                background: nsColor(for: style.background, fallback: .clear)
             )
         }
-        return (
-            nsColor(for: style.foreground, fallback: defaultForeground),
-            nsColor(for: style.background, fallback: .clear)
-        )
+        cachedStyleColors[style] = resolved
+        return resolved
     }
 
     private func readableForeground(
@@ -903,9 +939,20 @@ private final class TerminalGridView: NSTextView {
 
     private func updateRenderColors(_ snapshot: TerminalGridSnapshot) {
         cachedNSColors.removeAll(keepingCapacity: true)
+        cachedStyleColors.removeAll(keepingCapacity: true)
         cachedPaletteColors = snapshot.palette.map { color in
             nsColor(for: color, fallback: .clear)
         }
+    }
+
+    private func renderColorsChanged(
+        from previousSnapshot: TerminalGridSnapshot,
+        to snapshot: TerminalGridSnapshot
+    ) -> Bool {
+        previousSnapshot.defaultForeground != snapshot.defaultForeground
+            || previousSnapshot.defaultBackground != snapshot.defaultBackground
+            || previousSnapshot.cursorColor != snapshot.cursorColor
+            || previousSnapshot.palette != snapshot.palette
     }
 
     override func viewDidMoveToWindow() {

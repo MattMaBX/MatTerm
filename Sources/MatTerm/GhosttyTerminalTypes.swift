@@ -52,7 +52,7 @@ enum TerminalMouseEventKind: Equatable {
     case scrollDown
 }
 
-struct TerminalTextStyle: Equatable {
+struct TerminalTextStyle: Hashable {
     var foreground: TerminalColor = .default
     var background: TerminalColor = .default
     var bold = false
