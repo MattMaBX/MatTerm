@@ -123,6 +123,20 @@ enum GhosttyVTCheck {
         }.joined(separator: "\n")
         precondition(topText.contains("scroll-0"), "Ghostty top scrollback rows were not rendered")
 
+        engine.reset()
+        engine.write(Data("selection one\nselection two".utf8))
+        precondition(
+            engine.setSelection(startColumn: 0, startRow: 0, endColumn: 8, endRow: 0),
+            "Ghostty selection could not be installed"
+        )
+        let selectedSnapshot = engine.snapshot()
+        precondition(
+            selectedSnapshot.line(at: 0).prefix(9).allSatisfy(\.isSelected),
+            "Selected cells were not exposed by the render state"
+        )
+        precondition(engine.selectedText() == "selection", "Selected text was not formatted")
+        engine.clearSelection()
+
         print("ghostty-vt-check: ok")
     }
 }

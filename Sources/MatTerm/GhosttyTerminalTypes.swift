@@ -69,6 +69,7 @@ struct TerminalCell: Equatable {
     var character: Character
     var style: TerminalTextStyle
     var isContinuation = false
+    var isSelected = false
 }
 
 /// A renderer-facing view of the cells currently visible through Ghostty's

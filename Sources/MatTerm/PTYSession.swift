@@ -109,6 +109,7 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     func send(_ text: String) {
+        clearSelection()
         process?.send(text)
     }
 
@@ -119,6 +120,7 @@ final class TerminalSession: ObservableObject, Identifiable {
         optionAsAlt: Bool,
         repeatEvent: Bool = false
     ) -> Bool {
+        clearSelection()
         guard let data = encodedKeyEvent(
             keyCode: keyCode,
             modifiers: modifiers,
@@ -144,8 +146,37 @@ final class TerminalSession: ObservableObject, Identifiable {
     }
 
     func paste(_ text: String) {
+        clearSelection()
         guard let data = terminalEngine.encodePaste(text) else { return }
         process?.send(data)
+    }
+
+    @discardableResult
+    func setSelection(
+        startColumn: Int,
+        startRow: Int,
+        endColumn: Int,
+        endRow: Int,
+        rectangle: Bool = false
+    ) -> Bool {
+        let changed = terminalEngine.setSelection(
+            startColumn: startColumn,
+            startRow: startRow,
+            endColumn: endColumn,
+            endRow: endRow,
+            rectangle: rectangle
+        )
+        if changed { displayRevision &+= 1 }
+        return changed
+    }
+
+    func clearSelection() {
+        terminalEngine.clearSelection()
+        displayRevision &+= 1
+    }
+
+    func selectedText() -> String? {
+        terminalEngine.selectedText()
     }
 
     func requestFocus() {

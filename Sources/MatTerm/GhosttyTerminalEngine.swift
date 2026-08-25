@@ -159,6 +159,95 @@ final class GhosttyTerminalEngine {
         cachedSnapshot = nil
     }
 
+    @discardableResult
+    func setSelection(
+        startColumn: Int,
+        startRow: Int,
+        endColumn: Int,
+        endRow: Int,
+        rectangle: Bool = false
+    ) -> Bool {
+        guard let terminal,
+              let start = gridReference(column: startColumn, row: startRow),
+              let end = gridReference(column: endColumn, row: endRow) else {
+            return false
+        }
+
+        var selection = GhosttySelection()
+        selection.size = MemoryLayout<GhosttySelection>.size
+        selection.start = start
+        selection.end = end
+        selection.rectangle = rectangle
+        let result = withUnsafePointer(to: &selection) { pointer in
+            ghostty_terminal_set(
+                terminal,
+                GhosttyTerminalOption(rawValue: 21),
+                UnsafeRawPointer(pointer)
+            )
+        }
+        guard isSuccess(result) else { return false }
+        cachedSnapshot = nil
+        viewportScrollPending = false
+        return true
+    }
+
+    func clearSelection() {
+        guard let terminal else { return }
+        _ = ghostty_terminal_set(terminal, GhosttyTerminalOption(rawValue: 21), nil)
+        cachedSnapshot = nil
+    }
+
+    func selectedText() -> String? {
+        guard let terminal else { return nil }
+
+        var selection = GhosttySelection()
+        selection.size = MemoryLayout<GhosttySelection>.size
+        guard isSuccess(ghostty_terminal_get(
+            terminal,
+            GhosttyTerminalData(rawValue: 31),
+            &selection
+        )) else { return nil }
+
+        var options = GhosttyTerminalSelectionFormatOptions()
+        options.size = MemoryLayout<GhosttyTerminalSelectionFormatOptions>.size
+        options.emit = GhosttyFormatterFormat(rawValue: 0)
+        options.unwrap = true
+        options.trim = true
+        options.selection = nil
+
+        var output: UnsafeMutablePointer<UInt8>?
+        var length = 0
+        let result = ghostty_terminal_selection_format_alloc(
+            terminal,
+            nil,
+            options,
+            &output,
+            &length
+        )
+        guard isSuccess(result), let output, length > 0 else { return nil }
+        let text = String(decoding: UnsafeBufferPointer(start: output, count: length), as: UTF8.self)
+        ghostty_free(nil, output, length)
+        return text
+    }
+
+    private func gridReference(column: Int, row: Int) -> GhosttyGridRef? {
+        guard let terminal else { return nil }
+        var point = GhosttyPoint(
+            tag: GhosttyPointTag(rawValue: 2),
+            value: .init()
+        )
+        point.value.coordinate = GhosttyPointCoordinate(
+            x: UInt16(clamping: max(0, column)),
+            y: UInt32(clamping: max(0, row))
+        )
+        var reference = GhosttyGridRef()
+        reference.size = MemoryLayout<GhosttyGridRef>.size
+        guard isSuccess(ghostty_terminal_grid_ref(terminal, point, &reference)) else {
+            return nil
+        }
+        return reference
+    }
+
     func encodeKey(
         keyCode: UInt16,
         modifiers: UInt16,
@@ -628,6 +717,13 @@ final class GhosttyTerminalEngine {
         _ = ghostty_render_state_row_cells_get(cells, GhosttyRenderStateRowCellsData(rawValue: 1), &rawCell)
         _ = ghostty_cell_get(rawCell, GhosttyCellData(rawValue: 3), &wide)
 
+        var selected = false
+        _ = ghostty_render_state_row_cells_get(
+            cells,
+            GhosttyRenderStateRowCellsData(rawValue: 7),
+            &selected
+        )
+
         let cellForeground: TerminalColor
         switch style.fg_color.tag.rawValue {
         case GHOSTTY_STYLE_COLOR_PALETTE.rawValue:
@@ -673,7 +769,8 @@ final class GhosttyTerminalEngine {
                 invisible: style.invisible,
                 inverse: style.inverse
             ),
-            isContinuation: wide.rawValue == 2 || wide.rawValue == 3
+            isContinuation: wide.rawValue == 2 || wide.rawValue == 3,
+            isSelected: selected
         )
     }
 

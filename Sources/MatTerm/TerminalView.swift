@@ -134,6 +134,11 @@ final class TerminalBackdropNSView: NSView {
 
 private let terminalGridInset = CGFloat(14)
 
+private struct TerminalCellPosition: Equatable {
+    let column: Int
+    let row: Int
+}
+
 private final class TerminalScrollView: NSScrollView {
     func updateTerminalMouseMode() {
         guard let grid = documentView as? TerminalGridView,
@@ -370,6 +375,9 @@ private final class TerminalGridView: NSTextView {
     private var cursorBlinkOn = true
     private var lastMouseTracking: TerminalMouseTracking?
     private var pressedMouseButton: Int?
+    private var selectionAnchor: TerminalCellPosition?
+    private var selectionBase: TerminalCellPosition?
+    private var selectionRectangle = false
     private weak var registeredWindow: NSWindow?
 
     override var isFlipped: Bool { true }
@@ -612,7 +620,13 @@ private final class TerminalGridView: NSTextView {
     override func draw(_ dirtyRect: NSRect) {
         guard let snapshot, let appearance = terminalAppearance else { return }
         let characterWidth = appearance.characterWidth
-        let lineHeight = appearance.lineHeight
+        // A terminal row has two separate dimensions: the height occupied by
+        // its glyph/background and the distance to the next row. Keeping the
+        // configurable spacing out of the cell rectangle prevents Powerline
+        // prompt backgrounds and their arrow glyphs from changing shape when
+        // the user only asks for more space between rows.
+        let cellHeight = appearance.fontLineHeight
+        let rowHeight = appearance.lineHeight
         // AppKit may reuse a layer's old dirty rect while a clip view is
         // moved to a distant scrollback position. Derive the render range
         // from the current clip bounds so newly exposed history is never
@@ -628,8 +642,8 @@ private final class TerminalGridView: NSTextView {
         let drawRect = dirtyRect.intersects(visibleDocumentRect)
             ? dirtyRect.intersection(visibleDocumentRect)
             : visibleDocumentRect
-        let firstRow = max(0, Int(floor((drawRect.minY - terminalGridInset) / lineHeight)) - 1)
-        let lastRow = min(snapshot.contentRowCount - 1, Int(ceil((drawRect.maxY - terminalGridInset) / lineHeight)) + 1)
+        let firstRow = max(0, Int(floor((drawRect.minY - terminalGridInset) / rowHeight)) - 1)
+        let lastRow = min(snapshot.contentRowCount - 1, Int(ceil((drawRect.maxY - terminalGridInset) / rowHeight)) + 1)
         guard firstRow <= lastRow else { return }
 
         NSGraphicsContext.saveGraphicsState()
@@ -645,13 +659,30 @@ private final class TerminalGridView: NSTextView {
         drawRect.fill()
         for row in firstRow...lastRow {
             let line = snapshot.line(at: row)
-            let y = terminalGridInset + CGFloat(row) * lineHeight
+            let y = terminalGridInset + CGFloat(row) * rowHeight
             let firstColumn = max(0, Int(floor((drawRect.minX - terminalGridInset) / characterWidth)) - 1)
             let lastColumn = min(snapshot.columns - 1, Int(ceil((drawRect.maxX - terminalGridInset) / characterWidth)) + 1)
             guard firstColumn <= lastColumn else { continue }
 
             // Paint backgrounds first so a later cell can never cover text
-            // from an earlier cell in the same row.
+            // from an earlier cell in the same row. Keep adjacent cells with
+            // the same resolved color in one fill. `characterWidth` is often
+            // fractional (for example with SF Mono at non-integral sizes),
+            // and filling every cell independently makes Core Graphics
+            // antialias each fractional edge. On a long colored run those
+            // blended edges become the visible vertical stripes seen in the
+            // terminal. A single run has antialiasing only at its two outer
+            // edges, so the interior remains solid.
+            var backgroundRunColor: NSColor?
+            var backgroundRunRect = NSRect.zero
+
+            func flushBackgroundRun() {
+                guard let backgroundRunColor,
+                      !backgroundRunRect.isEmpty else { return }
+                backgroundRunColor.setFill()
+                backgroundRunRect.fill()
+            }
+
             for column in firstColumn...lastColumn {
                 let cell = line.indices.contains(column)
                     ? line[column]
@@ -663,17 +694,32 @@ private final class TerminalGridView: NSTextView {
                     x: terminalGridInset + CGFloat(column) * characterWidth,
                     y: y,
                     width: characterWidth * CGFloat(width),
-                    height: lineHeight
+                    height: cellHeight
                 )
                 let colors = colors(for: cell.style, snapshot: snapshot, appearance: appearance)
-                let background = isCursor
+                let background = cell.isSelected
+                    ? NSColor.selectedTextBackgroundColor
+                    : isCursor
                     ? nsColor(for: snapshot.cursorColor, fallback: appearance.theme.appKitCursor)
                     : colors.background
-                if background.alphaComponent > 0 {
-                    background.setFill()
-                    rect.fill()
+                guard background.alphaComponent > 0 else {
+                    flushBackgroundRun()
+                    backgroundRunColor = nil
+                    backgroundRunRect = .zero
+                    continue
+                }
+
+                let canAppend = backgroundRunColor?.isEqual(background) == true
+                    && abs(NSMaxX(backgroundRunRect) - rect.minX) < 0.5
+                if !canAppend {
+                    flushBackgroundRun()
+                    backgroundRunColor = background
+                    backgroundRunRect = rect
+                } else {
+                    backgroundRunRect.size.width = NSMaxX(rect) - backgroundRunRect.minX
                 }
             }
+            flushBackgroundRun()
 
             // Coalesce adjacent cells with the same style into one attributed
             // string. This avoids one dictionary and one attributed string per
@@ -681,14 +727,35 @@ private final class TerminalGridView: NSTextView {
             var runString = ""
             var runStyle: TerminalTextStyle?
             var runIsCursor = false
+            var runIsSelected = false
             var runRect = NSRect.zero
 
             func flushTextRun() {
                 guard !runString.isEmpty, let style = runStyle else { return }
-                var foreground = runIsCursor
+                let styleColors = colors(for: style, snapshot: snapshot, appearance: appearance)
+                let textBackground = runIsSelected
+                    ? NSColor.selectedTextBackgroundColor
+                    : (styleColors.background.alphaComponent > 0
+                        ? styleColors.background
+                        : nsColor(for: snapshot.defaultBackground, fallback: appearance.theme.appKitBackground))
+                var foreground = runIsSelected
+                    ? NSColor.selectedTextColor
+                    : runIsCursor
                     ? nsColor(for: snapshot.defaultBackground, fallback: appearance.theme.appKitBackground)
-                    : colors(for: style, snapshot: snapshot, appearance: appearance).foreground
-                if style.dim { foreground = foreground.withAlphaComponent(0.62) }
+                    : styleColors.foreground
+                if style.dim {
+                    foreground = foreground.blended(withFraction: 0.28, of: textBackground) ?? foreground
+                }
+                if !runIsCursor && !runIsSelected {
+                    foreground = readableForeground(
+                        foreground,
+                        on: textBackground,
+                        fallback: nsColor(
+                            for: snapshot.defaultForeground,
+                            fallback: appearance.theme.appKitForeground
+                        )
+                    )
+                }
                 let font = appearance.font(
                     ofSize: CGFloat(appearance.fontSize),
                     bold: style.bold,
@@ -706,6 +773,7 @@ private final class TerminalGridView: NSTextView {
                 runString.removeAll(keepingCapacity: true)
                 runStyle = nil
                 runIsCursor = false
+                runIsSelected = false
                 runRect = .zero
             }
 
@@ -720,7 +788,7 @@ private final class TerminalGridView: NSTextView {
                     x: terminalGridInset + CGFloat(column) * characterWidth,
                     y: y,
                     width: characterWidth * CGFloat(width),
-                    height: lineHeight
+                    height: cellHeight
                 )
                 let hidden = cell.character == " "
                     || cell.style.invisible
@@ -733,11 +801,13 @@ private final class TerminalGridView: NSTextView {
                 let adjacent = !runString.isEmpty
                     && runStyle == cell.style
                     && runIsCursor == isCursor
+                    && runIsSelected == cell.isSelected
                     && abs(NSMaxX(runRect) - rect.minX) < 0.5
                 if !adjacent { flushTextRun() }
                 if runString.isEmpty {
                     runStyle = cell.style
                     runIsCursor = isCursor
+                    runIsSelected = cell.isSelected
                     runRect = rect
                 } else {
                     runRect.size.width += rect.width
@@ -780,6 +850,55 @@ private final class TerminalGridView: NSTextView {
             nsColor(for: style.foreground, fallback: defaultForeground),
             nsColor(for: style.background, fallback: .clear)
         )
+    }
+
+    private func readableForeground(
+        _ foreground: NSColor,
+        on background: NSColor,
+        fallback: NSColor
+    ) -> NSColor {
+        guard let foreground = foreground.usingColorSpace(.sRGB),
+              let background = background.usingColorSpace(.sRGB),
+              let fallback = fallback.usingColorSpace(.sRGB) else {
+            return foreground
+        }
+
+        func luminance(_ color: NSColor) -> CGFloat {
+            func linear(_ component: CGFloat) -> CGFloat {
+                component <= 0.03928
+                    ? component / 12.92
+                    : pow((component + 0.055) / 1.055, 2.4)
+            }
+            return (0.2126 * linear(color.redComponent))
+                + (0.7152 * linear(color.greenComponent))
+                + (0.0722 * linear(color.blueComponent))
+        }
+
+        func contrast(_ color: NSColor, against background: NSColor) -> CGFloat {
+            let first = luminance(color)
+            let second = luminance(background)
+            return (max(first, second) + 0.05) / (min(first, second) + 0.05)
+        }
+
+        let minimumContrast: CGFloat = 2.15
+        guard contrast(foreground, against: background) < minimumContrast else {
+            return foreground
+        }
+
+        let white = NSColor.white.usingColorSpace(.sRGB)!
+        let black = NSColor.black.usingColorSpace(.sRGB)!
+        let fallbackTarget = contrast(fallback, against: background) >= minimumContrast
+            ? fallback
+            : (contrast(white, against: background) >= contrast(black, against: background) ? white : black)
+
+        for step in 1...8 {
+            let fraction = CGFloat(step) / 8
+            let candidate = foreground.blended(withFraction: fraction, of: fallbackTarget) ?? fallbackTarget
+            if contrast(candidate, against: background) >= minimumContrast {
+                return candidate
+            }
+        }
+        return fallbackTarget
     }
 
     private func updateRenderColors(_ snapshot: TerminalGridSnapshot) {
@@ -841,7 +960,39 @@ private final class TerminalGridView: NSTextView {
             sendMouse(.press, event: event, button: pressedMouseButton ?? -1, anyButtonPressed: true)
             return
         }
-        super.mouseDown(with: event)
+
+        guard event.buttonNumber == 0 else { return }
+        let position = terminalPosition(for: event)
+        if event.clickCount >= 3 {
+            selectionAnchor = position
+            selectionBase = position
+            selectionRectangle = false
+            selectLine(at: position)
+        } else if event.clickCount == 2 {
+            selectionAnchor = position
+            selectionBase = position
+            selectionRectangle = false
+            selectWord(at: position)
+        } else {
+            selectionAnchor = event.modifierFlags.contains(.shift)
+                ? (selectionBase ?? position)
+                : position
+            if !event.modifierFlags.contains(.shift) {
+                selectionBase = position
+            }
+            selectionRectangle = event.modifierFlags.contains(.option)
+            if !event.modifierFlags.contains(.shift) {
+                session?.clearSelection()
+            } else if let selectionAnchor, selectionAnchor != position {
+                _ = session?.setSelection(
+                    startColumn: selectionAnchor.column,
+                    startRow: selectionAnchor.row,
+                    endColumn: position.column,
+                    endRow: position.row,
+                    rectangle: selectionRectangle
+                )
+            }
+        }
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -850,7 +1001,8 @@ private final class TerminalGridView: NSTextView {
             pressedMouseButton = nil
             return
         }
-        super.mouseUp(with: event)
+        guard event.buttonNumber == 0 else { return }
+        selectionAnchor = nil
     }
 
     override func becomeFirstResponder() -> Bool {
@@ -865,15 +1017,41 @@ private final class TerminalGridView: NSTextView {
         return resigned
     }
 
-    override func rightMouseDown(with event: NSEvent) { mouseDown(with: event) }
-    override func rightMouseUp(with event: NSEvent) { mouseUp(with: event) }
+    override func rightMouseDown(with event: NSEvent) {
+        guard let session, session.mouseTracking != .off else {
+            onFocus?()
+            focus()
+            return
+        }
+        mouseDown(with: event)
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        guard let session, session.mouseTracking != .off else {
+            guard let menu = menu(for: event) else { return }
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
+        mouseUp(with: event)
+    }
     override func otherMouseDown(with event: NSEvent) { mouseDown(with: event) }
     override func otherMouseUp(with event: NSEvent) { mouseUp(with: event) }
 
     override func mouseDragged(with event: NSEvent) {
         guard let session else { return }
-        guard session.mouseTracking == .buttonMotion || session.mouseTracking == .anyMotion else { return }
-        sendMouse(.motion, event: event, button: pressedMouseButton ?? -1, anyButtonPressed: pressedMouseButton != nil)
+        if session.mouseTracking == .buttonMotion || session.mouseTracking == .anyMotion {
+            sendMouse(.motion, event: event, button: pressedMouseButton ?? -1, anyButtonPressed: pressedMouseButton != nil)
+            return
+        }
+        guard let anchor = selectionAnchor else { return }
+        let position = terminalPosition(for: event)
+        _ = session.setSelection(
+            startColumn: anchor.column,
+            startRow: anchor.row,
+            endColumn: position.column,
+            endRow: position.row,
+            rectangle: selectionRectangle
+        )
     }
 
     override func rightMouseDragged(with event: NSEvent) { mouseDragged(with: event) }
@@ -882,6 +1060,19 @@ private final class TerminalGridView: NSTextView {
     override func mouseMoved(with event: NSEvent) {
         guard session?.mouseTracking == .anyMotion else { return }
         sendMouse(.motion, event: event)
+    }
+
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard session?.mouseTracking == .off else { return super.menu(for: event) }
+        let menu = NSMenu()
+        let copy = NSMenuItem(title: "Copy", action: #selector(copy(_:)), keyEquivalent: "")
+        copy.target = self
+        copy.isEnabled = session?.selectedText()?.isEmpty == false
+        menu.addItem(copy)
+        let selectAll = NSMenuItem(title: "Select All", action: #selector(selectAll(_:)), keyEquivalent: "")
+        selectAll.target = self
+        menu.addItem(selectAll)
+        return menu
     }
 
     override func scrollWheel(with event: NSEvent) {
@@ -906,10 +1097,28 @@ private final class TerminalGridView: NSTextView {
 
     override func paste(_ sender: Any?) { pasteClipboardContents() }
 
+    override func copy(_ sender: Any?) { copySelection() }
+
+    override func selectAll(_ sender: Any?) { selectAllTerminalContent() }
+
+    override func cancelOperation(_ sender: Any?) {
+        session?.clearSelection()
+        selectionAnchor = nil
+        selectionBase = nil
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.contains(.command) else { return super.performKeyEquivalent(with: event) }
+        if event.keyCode == 8 {
+            copySelection()
+            return true
+        }
         if event.keyCode == 9 {
             pasteClipboardContents()
+            return true
+        }
+        if event.keyCode == 0 {
+            selectAllTerminalContent()
             return true
         }
         return super.performKeyEquivalent(with: event)
@@ -922,7 +1131,12 @@ private final class TerminalGridView: NSTextView {
     override func keyDown(with event: NSEvent) {
         guard let session else { super.keyDown(with: event); return }
         if event.modifierFlags.contains(.command) {
-            if event.keyCode == 9 { pasteClipboardContents() } else { super.keyDown(with: event) }
+            switch event.keyCode {
+            case 8: copySelection()
+            case 9: pasteClipboardContents()
+            case 0: selectAllTerminalContent()
+            default: super.keyDown(with: event)
+            }
             return
         }
         if event.modifierFlags.contains(.control),
@@ -953,6 +1167,84 @@ private final class TerminalGridView: NSTextView {
     private func pasteClipboardContents() {
         guard let text = NSPasteboard.general.string(forType: .string) else { return }
         session?.paste(text)
+    }
+
+    private func copySelection() {
+        guard let text = session?.selectedText(), !text.isEmpty else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(text, forType: .string)
+    }
+
+    private func selectAllTerminalContent() {
+        guard let session else { return }
+        let snapshot = session.displayGrid
+        guard snapshot.contentRowCount > 0, snapshot.columns > 0 else { return }
+        _ = session.setSelection(
+            startColumn: 0,
+            startRow: 0,
+            endColumn: snapshot.columns - 1,
+            endRow: snapshot.contentRowCount - 1
+        )
+    }
+
+    private func terminalPosition(for event: NSEvent) -> TerminalCellPosition {
+        let point = convert(event.locationInWindow, from: nil)
+        return terminalPosition(for: point)
+    }
+
+    private func terminalPosition(for point: NSPoint) -> TerminalCellPosition {
+        let characterWidth = max(1, terminalAppearance?.characterWidth ?? 8)
+        let rowHeight = max(1, terminalAppearance?.lineHeight ?? 16)
+        let columns = max(1, snapshot?.columns ?? Int(session?.columns ?? 1))
+        let rows = max(1, snapshot?.contentRowCount ?? Int(session?.rows ?? 1))
+        let column = min(
+            max(0, Int(floor((point.x - terminalGridInset) / characterWidth))),
+            columns - 1
+        )
+        let row = min(
+            max(0, Int(floor((point.y - terminalGridInset) / rowHeight))),
+            rows - 1
+        )
+        return TerminalCellPosition(column: column, row: row)
+    }
+
+    private func selectWord(at position: TerminalCellPosition) {
+        guard let session, let snapshot else { return }
+        let line = snapshot.line(at: position.row)
+        guard line.indices.contains(position.column) else { return }
+        let target = line[position.column].character
+        guard target != " " else { return }
+        let targetIsWord = isWordCharacter(target)
+        func matches(_ cell: TerminalCell) -> Bool {
+            guard cell.character != " " else { return false }
+            return isWordCharacter(cell.character) == targetIsWord
+        }
+        var start = position.column
+        var end = position.column
+        while start > 0, matches(line[start - 1]) { start -= 1 }
+        while end + 1 < line.count, matches(line[end + 1]) { end += 1 }
+        _ = session.setSelection(
+            startColumn: start,
+            startRow: position.row,
+            endColumn: end,
+            endRow: position.row
+        )
+    }
+
+    private func selectLine(at position: TerminalCellPosition) {
+        guard let session else { return }
+        let columns = max(1, snapshot?.columns ?? Int(session.columns))
+        _ = session.setSelection(
+            startColumn: 0,
+            startRow: position.row,
+            endColumn: columns - 1,
+            endRow: position.row
+        )
+    }
+
+    private func isWordCharacter(_ character: Character) -> Bool {
+        if character == "_" { return true }
+        return character.unicodeScalars.allSatisfy { CharacterSet.alphanumerics.contains($0) }
     }
 
     private func escapeSequence(for event: NSEvent) -> String? {
