@@ -178,13 +178,35 @@ private final class TerminalScrollView: NSScrollView {
 
 private final class TerminalClipView: NSClipView {
     weak var terminalGridView: TerminalGridView?
+    private var boundsObserver: NSObjectProtocol?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        installBoundsObserver()
     }
 
     required init?(coder: NSCoder) {
         super.init(coder: coder)
+        installBoundsObserver()
+    }
+
+    private func installBoundsObserver() {
+        postsBoundsChangedNotifications = true
+        boundsObserver = NotificationCenter.default.addObserver(
+            forName: NSView.boundsDidChangeNotification,
+            object: self,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.terminalGridView?.scheduleNativeViewportUpdate()
+            }
+        }
+    }
+
+    deinit {
+        if let boundsObserver {
+            NotificationCenter.default.removeObserver(boundsObserver)
+        }
     }
 
     override var isFlipped: Bool { true }
@@ -214,7 +236,6 @@ private final class TerminalClipView: NSClipView {
 
     override func viewBoundsChanged(_ notification: Notification) {
         super.viewBoundsChanged(notification)
-        terminalGridView?.scheduleNativeViewportUpdate()
     }
 }
 
@@ -446,19 +467,13 @@ private final class TerminalGridView: NSTextView {
         }
         let shouldFollowOutput = isNearBottom
         if contentChanged || fontChanged {
-            let previousSnapshot = snapshot
             snapshot = session.displayGrid
             if let snapshot {
-                let colorsChanged = previousSnapshot.map {
-                    renderColorsChanged(from: $0, to: snapshot)
-                } ?? true
-                if colorsChanged {
-                    updateRenderColors(snapshot)
-                }
+                updateRenderColors(snapshot)
             }
             updateDocumentFrame()
             synchronizeNativeViewport()
-            invalidateVisibleTerminalArea(previousSnapshot: previousSnapshot)
+            invalidateVisibleTerminalArea()
             if snapshot?.isAlternateScreen == true {
                 scrollDocumentToTop()
             } else if shouldFollowOutput {
@@ -576,7 +591,7 @@ private final class TerminalGridView: NSTextView {
         }
     }
 
-    private func invalidateVisibleTerminalArea(previousSnapshot: TerminalGridSnapshot? = nil) {
+    private func invalidateVisibleTerminalArea() {
         guard let clipView = enclosingScrollView?.contentView else {
             setNeedsDisplay(visibleRect)
             return
@@ -584,45 +599,13 @@ private final class TerminalGridView: NSTextView {
         let rect = convert(clipView.bounds, from: clipView).intersection(bounds)
         guard !rect.isNull, !rect.isEmpty else { return }
 
-        // Native scrolling already moves the existing layer contents. When
-        // the viewport advances by a few rows, only the newly exposed band
-        // needs to be redrawn; repainting every cell in the pane here makes a
-        // high-resolution trackpad scroll spend most of its frame in text
-        // layout. Large jumps and normal terminal output still repaint the
-        // complete visible area.
-        guard let previousSnapshot,
-              let snapshot,
-              previousSnapshot.isAlternateScreen == snapshot.isAlternateScreen,
-              previousSnapshot.columns == snapshot.columns,
-              previousSnapshot.rows == snapshot.rows else {
-            setNeedsDisplay(rect)
-            return
-        }
-        let rowDelta = snapshot.screenTopIndex - previousSnapshot.screenTopIndex
-        let rowHeight = max(1, terminalAppearance?.lineHeight ?? 1)
-        guard rowDelta != 0, abs(rowDelta) < snapshot.rows else {
-            setNeedsDisplay(rect)
-            return
-        }
-
-        let extraRow = rowHeight
-        let exposedBand: NSRect
-        if rowDelta > 0 {
-            exposedBand = NSRect(
-                x: rect.minX,
-                y: rect.maxY - CGFloat(rowDelta) * rowHeight - extraRow,
-                width: rect.width,
-                height: CGFloat(rowDelta) * rowHeight + extraRow * 2
-            )
-        } else {
-            exposedBand = NSRect(
-                x: rect.minX,
-                y: rect.minY - extraRow,
-                width: rect.width,
-                height: CGFloat(-rowDelta) * rowHeight + extraRow * 2
-            )
-        }
-        setNeedsDisplay(exposedBand.intersection(rect))
+        // Scrolling changes the mapping between absolute document rows and
+        // Ghostty's viewport rows. AppKit may move an existing backing-store
+        // image before this invalidation arrives, so repainting only an
+        // exposed band can leave the rest of the viewport blank or stale.
+        // Repaint the whole visible terminal area; draw(_:) still limits work
+        // to visible rows and the color caches keep the hot path cheap.
+        setNeedsDisplay(rect)
     }
 
     private func resizeSessionToViewport() {
@@ -943,16 +926,6 @@ private final class TerminalGridView: NSTextView {
         cachedPaletteColors = snapshot.palette.map { color in
             nsColor(for: color, fallback: .clear)
         }
-    }
-
-    private func renderColorsChanged(
-        from previousSnapshot: TerminalGridSnapshot,
-        to snapshot: TerminalGridSnapshot
-    ) -> Bool {
-        previousSnapshot.defaultForeground != snapshot.defaultForeground
-            || previousSnapshot.defaultBackground != snapshot.defaultBackground
-            || previousSnapshot.cursorColor != snapshot.cursorColor
-            || previousSnapshot.palette != snapshot.palette
     }
 
     override func viewDidMoveToWindow() {
