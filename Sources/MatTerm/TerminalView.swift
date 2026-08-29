@@ -465,9 +465,20 @@ private final class TerminalGridView: NSTextView {
         if contentChanged || fontChanged || blinkSettingChanged || focusChanged {
             cursorBlinkOn = true
         }
-        let shouldFollowOutput = isNearBottom
+        // AppKit's scroll position and Ghostty's viewport are independent.
+        // When output extends the buffer while the user is at the live end,
+        // move both to the bottom before taking the render snapshot. Moving
+        // only the document leaves Ghostty rendering the old viewport rows,
+        // so the prompt and subsequent input appear below a scrollbar that
+        // already claims to be at the bottom.
+        let shouldFollowOutput = isAtBottom
         if contentChanged || fontChanged {
-            snapshot = session.displayGrid
+            var updatedSnapshot = session.displayGrid
+            if shouldFollowOutput, !updatedSnapshot.isAlternateScreen {
+                session.scrollToBottom()
+                updatedSnapshot = session.displayGrid
+            }
+            snapshot = updatedSnapshot
             if let snapshot {
                 updateRenderColors(snapshot)
             }
@@ -502,11 +513,11 @@ private final class TerminalGridView: NSTextView {
         updateContent()
     }
 
-    private var isNearBottom: Bool {
+    private var isAtBottom: Bool {
         guard let scrollView = enclosingScrollView else { return true }
-        let visibleMaxY = NSMaxY(scrollView.contentView.bounds)
-        let documentMaxY = NSMaxY(scrollView.documentView?.bounds ?? .zero)
-        return documentMaxY - visibleMaxY < 24
+        let clipView = scrollView.contentView
+        let maxY = max(0, NSMaxY(bounds) - clipView.bounds.height)
+        return clipView.bounds.minY >= maxY - 0.5
     }
 
     private func scrollDocumentToBottom() {
@@ -548,7 +559,22 @@ private final class TerminalGridView: NSTextView {
         guard let scrollView = enclosingScrollView else { return }
         let lineHeight = max(1, appearance.lineHeight)
         let maxRow = max(0, snapshot.totalRows - snapshot.rows)
-        let row = min(maxRow, max(0, Int((scrollView.contentView.bounds.minY / lineHeight).rounded())))
+        let clipView = scrollView.contentView
+        let maxY = max(0, NSMaxY(bounds) - clipView.bounds.height)
+
+        // The document's physical bottom is often between terminal row
+        // boundaries because the viewport height is not a whole number of
+        // line heights. Rounding the coordinate can therefore resolve to the
+        // penultimate row even while the native scroller is at 1.0, hiding
+        // the prompt. The bottom is a distinct terminal viewport state.
+        if clipView.bounds.minY >= maxY - 0.5 {
+            guard snapshot.screenTopIndex != maxRow else { return }
+            session.scrollToBottom()
+            updateContent()
+            return
+        }
+
+        let row = min(maxRow, max(0, Int((clipView.bounds.minY / lineHeight).rounded())))
         guard row != snapshot.screenTopIndex else { return }
         session.scrollViewport(row: row)
         // Native scrolling can move the clip view before SwiftUI gets a
