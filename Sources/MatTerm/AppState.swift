@@ -494,9 +494,15 @@ final class TerminalWorkspace: ObservableObject, Identifiable {
     }
 
     @discardableResult
-    func splitFocusedPane(direction: TerminalSplitDirection) -> TerminalSession? {
+    func splitFocusedPane(
+        direction: TerminalSplitDirection,
+        scrollbackLineLimit: Int
+    ) -> TerminalSession? {
         guard let focusedSession else { return nil }
-        let newSession = TerminalSession(kind: focusedSession.kind)
+        let newSession = TerminalSession(
+            kind: focusedSession.kind,
+            scrollbackLineLimit: scrollbackLineLimit
+        )
         let newLeaf = TerminalSplitNode.leaf(newSession)
         let existingLeaf = TerminalSplitNode.leaf(focusedSession)
         let replacement: TerminalSplitNode
@@ -568,8 +574,10 @@ final class AppState: ObservableObject {
     private var mainWindowOpener: (() -> Void)?
     private var cachedMainWindow: NSWindow?
     private var mainWindowCloseObserver: NSObjectProtocol?
+    private var scrollbackLineLimit: Int
 
     init() {
+        scrollbackLineLimit = AppPreferences.persistedScrollbackLineLimit()
         openLocalSession()
     }
 
@@ -583,11 +591,25 @@ final class AppState: ObservableObject {
     }
 
     func openLocalSession() {
-        openWorkspace(session: TerminalSession(kind: .local))
+        openWorkspace(session: TerminalSession(
+            kind: .local,
+            scrollbackLineLimit: scrollbackLineLimit
+        ))
     }
 
     func openSSHSession(profile: SSHProfile) {
-        openWorkspace(session: TerminalSession(kind: .ssh(profile)))
+        openWorkspace(session: TerminalSession(
+            kind: .ssh(profile),
+            scrollbackLineLimit: scrollbackLineLimit
+        ))
+    }
+
+    func configureScrollback(maxLines: Int) {
+        let clampedValue = AppPreferences.clampedScrollbackLineLimit(maxLines)
+        scrollbackLineLimit = clampedValue
+        for workspace in workspaces {
+            workspace.sessions.forEach { $0.configureScrollback(maxLines: clampedValue) }
+        }
     }
 
     func showSSHProfileSelector() {
@@ -739,7 +761,10 @@ final class AppState: ObservableObject {
 
     func splitSelectedPane(direction: TerminalSplitDirection) {
         guard let selectedWorkspace else { return }
-        selectedWorkspace.splitFocusedPane(direction: direction)
+        selectedWorkspace.splitFocusedPane(
+            direction: direction,
+            scrollbackLineLimit: scrollbackLineLimit
+        )
     }
 
     private func openWorkspace(session: TerminalSession) {

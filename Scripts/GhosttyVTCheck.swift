@@ -6,6 +6,18 @@ enum GhosttyVTCheck {
     static func main() {
         let engine = GhosttyTerminalEngine(columns: 32, rows: 8)
         precondition(engine.isReady, "Ghostty terminal resources were not created")
+        precondition(engine.configureScrollback(maxLines: 123), "Ghostty scrollback limit was not configured")
+        precondition(engine.scrollbackMaximumLines == 123, "Ghostty scrollback limit was not retained")
+        precondition(engine.scrollbackMaximumBytes == nil, "Ghostty byte limit was not removed")
+
+        let longHistoryEngine = GhosttyTerminalEngine(columns: 32, rows: 8)
+        precondition(longHistoryEngine.configureScrollback(maxLines: 2_000), "Long-history limit was not configured")
+        let longHistory = (0..<1_000).map { "history-\($0)\n" }.joined()
+        longHistoryEngine.write(Data(longHistory.utf8))
+        precondition(
+            longHistoryEngine.snapshot().totalRows >= 1_000,
+            "Configured row limit was preempted by a byte limit"
+        )
 
         var palette = Array(repeating: GhosttyColorRgb(r: 0, g: 0, b: 0), count: 256)
         palette[1] = GhosttyColorRgb(r: 255, g: 16, b: 32)

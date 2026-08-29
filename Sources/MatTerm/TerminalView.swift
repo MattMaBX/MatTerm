@@ -197,7 +197,7 @@ private final class TerminalClipView: NSClipView {
             object: self,
             queue: .main
         ) { [weak self] _ in
-            Task { @MainActor [weak self] in
+            MainActor.assumeIsolated {
                 self?.terminalGridView?.scheduleNativeViewportUpdate()
             }
         }
@@ -373,8 +373,17 @@ private final class TerminalGridView: NSTextView {
     private var cachedPaletteColors: [NSColor] = []
     private var cachedNSColors: [TerminalColor: NSColor] = [:]
     private var cachedStyleColors: [TerminalTextStyle: ResolvedTerminalColors] = [:]
+    private var cachedDocumentLines: [Int: [TerminalCell]] = [:]
+    private var cachedDocumentLineColumns: Int?
+    private var cachedDocumentLineAlternateScreen: Bool?
+    // Ghostty exposes exactly one terminal-sized viewport per render snapshot.
+    // Keep adjacent pages around the displayed viewport so native fractional
+    // scrolling never exposes an unread line or requires a C traversal per row.
+    private var leadingLineBuffer: TerminalGridSnapshot?
+    private var trailingLineBuffer: TerminalGridSnapshot?
     private var synchronizingNativeViewport = false
     private var nativeViewportUpdateScheduled = false
+    private var lastNativeViewportRect: NSRect?
     private var cursorBlinkTimer: Timer?
     private var windowKeyObserver: NSObjectProtocol?
     private var cursorBlinkOn = true
@@ -451,7 +460,10 @@ private final class TerminalGridView: NSTextView {
         updateContent()
     }
 
-    func updateContent() {
+    func updateContent(
+        shouldSynchronizeNativeViewport: Bool = true,
+        previousNativeViewport: NSRect? = nil
+    ) {
         guard let session, let appearance = terminalAppearance else { return }
         let contentChanged = lastDisplayRevision != session.displayRevision
         let fontChanged = lastFontSize != appearance.fontSize
@@ -471,27 +483,56 @@ private final class TerminalGridView: NSTextView {
         // only the document leaves Ghostty rendering the old viewport rows,
         // so the prompt and subsequent input appear below a scrollbar that
         // already claims to be at the bottom.
-        let shouldFollowOutput = isAtBottom
+        let shouldFollowOutput = shouldSynchronizeNativeViewport && isAtBottom
         if contentChanged || fontChanged {
+            // New output can modify the cells held by an old read-ahead page.
+            // Keep the document cache (history before the active screen is
+            // immutable), but replace the page after reading the new state.
+            leadingLineBuffer = nil
+            trailingLineBuffer = nil
+            let previousSnapshot = snapshot
             var updatedSnapshot = session.displayGrid
             if shouldFollowOutput, !updatedSnapshot.isAlternateScreen {
                 session.scrollToBottom()
                 updatedSnapshot = session.displayGrid
+            } else if !updatedSnapshot.isAlternateScreen,
+                      let physicalRow = physicalViewportRow(
+                        maxRow: max(0, updatedSnapshot.totalRows - updatedSnapshot.rows)
+                      ),
+                      updatedSnapshot.screenTopIndex != physicalRow {
+                // Adjacent cache pages move Ghostty's internal viewport while
+                // idle. PTY output must refresh the physical AppKit viewport,
+                // not whichever page was last pre-read.
+                session.scrollViewport(row: physicalRow)
+                updatedSnapshot = session.displayGrid
             }
             snapshot = updatedSnapshot
             if let snapshot {
-                updateRenderColors(snapshot)
+                cacheDocumentLines(snapshot)
+                let colorsChanged = previousSnapshot.map {
+                    renderColorsChanged(from: $0, to: snapshot)
+                } ?? true
+                if colorsChanged {
+                    updateRenderColors(snapshot)
+                }
             }
             updateDocumentFrame()
-            synchronizeNativeViewport()
-            invalidateVisibleTerminalArea()
-            if snapshot?.isAlternateScreen == true {
-                scrollDocumentToTop()
-            } else if shouldFollowOutput {
-                scrollDocumentToBottom()
+            if shouldSynchronizeNativeViewport {
+                synchronizeNativeViewport()
             }
+            lastNativeViewportRect = invalidateVisibleTerminalArea(
+                previousNativeViewport: previousNativeViewport
+            )
+            if shouldSynchronizeNativeViewport {
+                if snapshot?.isAlternateScreen == true {
+                    scrollDocumentToTop()
+                } else if shouldFollowOutput {
+                    scrollDocumentToBottom()
+                }
+            }
+            prepareAdjacentLineBuffers()
         } else if blinkChanged || blinkSettingChanged || focusChanged {
-            invalidateVisibleTerminalArea()
+            lastNativeViewportRect = invalidateVisibleTerminalArea()
         }
 
         lastDisplayRevision = session.displayRevision
@@ -542,11 +583,8 @@ private final class TerminalGridView: NSTextView {
     func scheduleNativeViewportUpdate() {
         guard !nativeViewportUpdateScheduled else { return }
         nativeViewportUpdateScheduled = true
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.nativeViewportUpdateScheduled = false
-            self.nativeViewportDidChange()
-        }
+        nativeViewportDidChange()
+        nativeViewportUpdateScheduled = false
     }
 
     func nativeViewportDidChange() {
@@ -561,6 +599,7 @@ private final class TerminalGridView: NSTextView {
         let maxRow = max(0, snapshot.totalRows - snapshot.rows)
         let clipView = scrollView.contentView
         let maxY = max(0, NSMaxY(bounds) - clipView.bounds.height)
+        let previousViewport = lastNativeViewportRect
 
         // The document's physical bottom is often between terminal row
         // boundaries because the viewport height is not a whole number of
@@ -568,20 +607,41 @@ private final class TerminalGridView: NSTextView {
         // penultimate row even while the native scroller is at 1.0, hiding
         // the prompt. The bottom is a distinct terminal viewport state.
         if clipView.bounds.minY >= maxY - 0.5 {
-            guard snapshot.screenTopIndex != maxRow else { return }
+            guard snapshot.screenTopIndex != maxRow else {
+                lastNativeViewportRect = visibleTerminalRect()
+                return
+            }
             session.scrollToBottom()
             updateContent()
             return
         }
 
-        let row = min(maxRow, max(0, Int((clipView.bounds.minY / lineHeight).rounded())))
-        guard row != snapshot.screenTopIndex else { return }
-        session.scrollViewport(row: row)
-        // Native scrolling can move the clip view before SwiftUI gets a
-        // chance to re-enter updateNSView. Refresh the viewport synchronously
-        // so newly exposed history rows are drawn instead of showing the
-        // document's never-painted background.
-        updateContent()
+        let physicalRow = min(
+            maxRow,
+            max(0, Int(floor(clipView.bounds.minY / lineHeight)))
+        )
+
+        if !hasBufferedDocumentLines(forViewportStartingAt: physicalRow) {
+            // A scrollbar jump can leave the three-page cache entirely. Load
+            // a new anchor page, then rebuild both adjacent buffers below.
+            session.scrollViewport(row: physicalRow)
+            self.snapshot = session.displayGrid
+            leadingLineBuffer = nil
+            trailingLineBuffer = nil
+            if let updatedSnapshot = self.snapshot {
+                cacheDocumentLines(updatedSnapshot)
+                updateDocumentFrame()
+            }
+        }
+
+        // Even while the physical top remains within one line, AppKit can
+        // expose a fractional part of the following row. Keep that row in a
+        // separate pre-read page before the drawing pass runs.
+        prepareAdjacentLineBuffers()
+        lastNativeViewportRect = invalidateVisibleTerminalArea(
+            previousNativeViewport: previousViewport
+        )
+        lastDisplayRevision = session.displayRevision
     }
 
     private func synchronizeNativeViewport() {
@@ -617,21 +677,172 @@ private final class TerminalGridView: NSTextView {
         }
     }
 
-    private func invalidateVisibleTerminalArea() {
-        guard let clipView = enclosingScrollView?.contentView else {
-            setNeedsDisplay(visibleRect)
+    private func visibleTerminalRect() -> NSRect? {
+        guard let clipView = enclosingScrollView?.contentView else { return nil }
+        let rect = convert(clipView.bounds, from: clipView).intersection(bounds)
+        return rect.isNull || rect.isEmpty ? nil : rect
+    }
+
+    private func physicalViewportRow(maxRow: Int) -> Int? {
+        guard let clipView = enclosingScrollView?.contentView,
+              let appearance = terminalAppearance else { return nil }
+        let lineHeight = max(1, appearance.lineHeight)
+        return min(maxRow, max(0, Int(floor(clipView.bounds.minY / lineHeight))))
+    }
+
+    private func hasBufferedDocumentLines(forViewportStartingAt row: Int) -> Bool {
+        guard let snapshot else { return false }
+        let lastVisibleRow = min(
+            snapshot.contentRowCount - 1,
+            row + snapshot.rows
+        )
+        return cachedDocumentLines[row] != nil
+            && cachedDocumentLines[lastVisibleRow] != nil
+    }
+
+    private func prepareAdjacentLineBuffers() {
+        guard let session,
+              let snapshot,
+              !snapshot.isAlternateScreen,
+              session.mouseTracking == .off else {
+            leadingLineBuffer = nil
+            trailingLineBuffer = nil
             return
         }
-        let rect = convert(clipView.bounds, from: clipView).intersection(bounds)
-        guard !rect.isNull, !rect.isEmpty else { return }
 
-        // Scrolling changes the mapping between absolute document rows and
-        // Ghostty's viewport rows. AppKit may move an existing backing-store
-        // image before this invalidation arrives, so repainting only an
-        // exposed band can leave the rest of the viewport blank or stale.
-        // Repaint the whole visible terminal area; draw(_:) still limits work
-        // to visible rows and the color caches keep the hot path cheap.
-        setNeedsDisplay(rect)
+        let maxRow = max(0, snapshot.totalRows - snapshot.rows)
+        let pageRows = max(1, snapshot.rows)
+        let previousPage = max(0, snapshot.screenTopIndex - pageRows)
+        let nextPage = min(maxRow, snapshot.screenTopIndex + pageRows)
+
+        if previousPage < snapshot.screenTopIndex,
+           leadingLineBuffer?.screenTopIndex != previousPage {
+            session.scrollViewport(row: previousPage)
+            let buffered = session.displayGrid
+            cacheDocumentLines(buffered)
+            leadingLineBuffer = buffered
+        } else if previousPage == snapshot.screenTopIndex {
+            leadingLineBuffer = nil
+        }
+
+        if nextPage > snapshot.screenTopIndex,
+           trailingLineBuffer?.screenTopIndex != nextPage {
+            session.scrollViewport(row: nextPage)
+            let buffered = session.displayGrid
+            cacheDocumentLines(buffered)
+            trailingLineBuffer = buffered
+        } else if nextPage == snapshot.screenTopIndex {
+            trailingLineBuffer = nil
+        }
+
+        trimDocumentLineCache(around: snapshot)
+    }
+
+    private func trimDocumentLineCache(around snapshot: TerminalGridSnapshot) {
+        let pageRows = max(1, snapshot.rows)
+        let lowerBound = max(0, snapshot.screenTopIndex - pageRows * 2)
+        let upperBound = min(
+            snapshot.contentRowCount - 1,
+            snapshot.screenTopIndex + pageRows * 3
+        )
+        cachedDocumentLines = cachedDocumentLines.filter { row, _ in
+            row >= lowerBound && row <= upperBound
+        }
+    }
+
+    @discardableResult
+    private func invalidateVisibleTerminalArea(previousNativeViewport: NSRect? = nil) -> NSRect? {
+        guard let rect = visibleTerminalRect() else {
+            setNeedsDisplay(visibleRect)
+            return nil
+        }
+
+        guard let previousNativeViewport,
+              previousNativeViewport.width == rect.width,
+              previousNativeViewport.height == rect.height,
+              let exposedRect = exposedTerminalRect(
+                afterScrollingFrom: previousNativeViewport,
+                to: rect
+              ) else {
+            // Terminal output, a resize, or an initial render changes more
+            // than scrollback exposure. Those cases must redraw the viewport.
+            setNeedsDisplay(rect)
+            return rect
+        }
+
+        // AppKit copies the overlapping pixels as the clip view moves. Only
+        // clear and paint the rows newly exposed at the leading edge, avoiding
+        // a full transparent clear that makes every glyph flash while a
+        // trackpad gesture is in flight.
+        setNeedsDisplay(exposedRect)
+        return rect
+    }
+
+    private func exposedTerminalRect(afterScrollingFrom previous: NSRect, to current: NSRect) -> NSRect? {
+        let verticalDelta = current.minY - previous.minY
+        guard abs(verticalDelta) > 0.5, abs(verticalDelta) < current.height else { return nil }
+        let exposed: NSRect
+        if verticalDelta > 0 {
+            exposed = NSRect(
+                x: current.minX,
+                y: max(current.minY, previous.maxY),
+                width: current.width,
+                height: current.maxY - max(current.minY, previous.maxY)
+            )
+        } else {
+            exposed = NSRect(
+                x: current.minX,
+                y: current.minY,
+                width: current.width,
+                height: min(current.maxY, previous.minY) - current.minY
+            )
+        }
+        guard !exposed.isEmpty else { return nil }
+
+        let rowHeight = max(1, terminalAppearance?.lineHeight ?? 1)
+        let firstRow = floor((exposed.minY - terminalGridInset) / rowHeight) - 1
+        let lastRow = ceil((exposed.maxY - terminalGridInset) / rowHeight) + 1
+        let rowAligned = NSRect(
+            x: current.minX,
+            y: terminalGridInset + firstRow * rowHeight,
+            width: current.width,
+            height: max(rowHeight, (lastRow - firstRow) * rowHeight)
+        ).intersection(current)
+        guard !rowAligned.isNull, !rowAligned.isEmpty else { return nil }
+        return rowAligned
+    }
+
+    private func cacheDocumentLines(_ snapshot: TerminalGridSnapshot) {
+        guard !snapshot.isAlternateScreen else {
+            cachedDocumentLines.removeAll(keepingCapacity: true)
+            cachedDocumentLineColumns = nil
+            cachedDocumentLineAlternateScreen = snapshot.isAlternateScreen
+            leadingLineBuffer = nil
+            trailingLineBuffer = nil
+            return
+        }
+        guard cachedDocumentLineColumns == nil ||
+                (cachedDocumentLineColumns == snapshot.columns &&
+                 cachedDocumentLineAlternateScreen == snapshot.isAlternateScreen) else {
+            cachedDocumentLines.removeAll(keepingCapacity: true)
+            cachedDocumentLineColumns = nil
+            cachedDocumentLineAlternateScreen = nil
+            leadingLineBuffer = nil
+            trailingLineBuffer = nil
+            cacheDocumentLines(snapshot)
+            return
+        }
+
+        cachedDocumentLineColumns = snapshot.columns
+        cachedDocumentLineAlternateScreen = snapshot.isAlternateScreen
+        for (offset, line) in snapshot.lines.enumerated() {
+            cachedDocumentLines[snapshot.screenTopIndex + offset] = line
+        }
+
+    }
+
+    private func documentLine(at row: Int, in snapshot: TerminalGridSnapshot) -> [TerminalCell] {
+        cachedDocumentLines[row] ?? snapshot.line(at: row)
     }
 
     private func resizeSessionToViewport() {
@@ -696,7 +907,7 @@ private final class TerminalGridView: NSTextView {
         NSColor.clear.setFill()
         drawRect.fill(using: .copy)
         for row in firstRow...lastRow {
-            let line = snapshot.line(at: row)
+            let line = documentLine(at: row, in: snapshot)
             let y = terminalGridInset + CGFloat(row) * rowHeight
             let firstColumn = max(0, Int(floor((drawRect.minX - terminalGridInset) / characterWidth)) - 1)
             let lastColumn = min(snapshot.columns - 1, Int(ceil((drawRect.maxX - terminalGridInset) / characterWidth)) + 1)
@@ -952,6 +1163,16 @@ private final class TerminalGridView: NSTextView {
         cachedPaletteColors = snapshot.palette.map { color in
             nsColor(for: color, fallback: .clear)
         }
+    }
+
+    private func renderColorsChanged(
+        from previousSnapshot: TerminalGridSnapshot,
+        to snapshot: TerminalGridSnapshot
+    ) -> Bool {
+        previousSnapshot.defaultForeground != snapshot.defaultForeground
+            || previousSnapshot.defaultBackground != snapshot.defaultBackground
+            || previousSnapshot.cursorColor != snapshot.cursorColor
+            || previousSnapshot.palette != snapshot.palette
     }
 
     override func viewDidMoveToWindow() {
@@ -1256,7 +1477,7 @@ private final class TerminalGridView: NSTextView {
 
     private func selectWord(at position: TerminalCellPosition) {
         guard let session, let snapshot else { return }
-        let line = snapshot.line(at: position.row)
+        let line = documentLine(at: position.row, in: snapshot)
         guard line.indices.contains(position.column) else { return }
         let target = line[position.column].character
         guard target != " " else { return }

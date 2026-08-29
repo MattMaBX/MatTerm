@@ -29,11 +29,12 @@ final class TerminalSession: ObservableObject, Identifiable {
     private var workingDirectoryTimer: Timer?
     private let outputFlushDelay: TimeInterval = 1.0 / 60.0
 
-    init(kind: SessionKind) {
+    init(kind: SessionKind, scrollbackLineLimit: Int = 240_000) {
         self.kind = kind
         terminalEngine = GhosttyTerminalEngine(columns: requestedColumns, rows: requestedRows)
         workingDirectory = "~"
         title = kind.title
+        terminalEngine.configureScrollback(maxLines: scrollbackLineLimit)
     }
 
     var iconName: String { kind.iconName }
@@ -221,6 +222,11 @@ final class TerminalSession: ObservableObject, Identifiable {
         guard colorConfiguration?.id != configuration.id else { return }
         colorConfiguration = configuration
         terminalEngine.configureColors(configuration)
+        displayRevision &+= 1
+    }
+
+    func configureScrollback(maxLines: Int) {
+        guard terminalEngine.configureScrollback(maxLines: maxLines) else { return }
         displayRevision &+= 1
     }
 

@@ -274,6 +274,19 @@ final class AppPreferences: ObservableObject {
     @Published var metaKeyEnabled: Bool {
         didSet { defaults.set(metaKeyEnabled, forKey: Keys.metaKeyEnabled) }
     }
+    @Published var scrollbackLineLimit: Int {
+        didSet {
+            let clampedValue = Self.clampedScrollbackLineLimit(scrollbackLineLimit)
+            if scrollbackLineLimit != clampedValue {
+                scrollbackLineLimit = clampedValue
+            } else {
+                defaults.set(scrollbackLineLimit, forKey: Keys.scrollbackLineLimit)
+            }
+        }
+    }
+
+    static let defaultScrollbackLineLimit = 240_000
+    static let scrollbackLineLimitRange = 1_000...1_000_000
 
     private let defaults = UserDefaults.standard
 
@@ -282,6 +295,7 @@ final class AppPreferences: ObservableObject {
         static let alwaysOnTop = "application.alwaysOnTop"
         static let sidebarAppearance = "application.sidebarAppearance"
         static let metaKeyEnabled = "terminal.metaKeyEnabled"
+        static let scrollbackLineLimit = "terminal.scrollbackLineLimit"
     }
 
     init() {
@@ -291,6 +305,17 @@ final class AppPreferences: ObservableObject {
             rawValue: defaults.string(forKey: Keys.sidebarAppearance) ?? ""
         ) ?? .system
         metaKeyEnabled = defaults.object(forKey: Keys.metaKeyEnabled) as? Bool ?? true
+        scrollbackLineLimit = Self.persistedScrollbackLineLimit()
+    }
+
+    static func clampedScrollbackLineLimit(_ value: Int) -> Int {
+        min(max(value, scrollbackLineLimitRange.lowerBound), scrollbackLineLimitRange.upperBound)
+    }
+
+    static func persistedScrollbackLineLimit() -> Int {
+        let value = UserDefaults.standard.object(forKey: Keys.scrollbackLineLimit) as? Int
+            ?? defaultScrollbackLineLimit
+        return clampedScrollbackLineLimit(value)
     }
 
     func text(_ value: AppText) -> String {

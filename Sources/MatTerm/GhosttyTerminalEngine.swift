@@ -160,6 +160,32 @@ final class GhosttyTerminalEngine {
     }
 
     @discardableResult
+    func configureScrollback(maxLines: Int) -> Bool {
+        guard let terminal, maxLines >= 0 else { return false }
+        // Ghostty applies the byte and line limits together. Its default byte
+        // limit can be reached long before the user-configured row count, so
+        // remove it and let the exposed row limit be the sole constraint.
+        guard isSuccess(ghostty_terminal_set(
+            terminal,
+            GhosttyTerminalOption(rawValue: 27),
+            nil
+        )) else { return false }
+        var lineLimit = UInt(maxLines)
+        let result = withUnsafePointer(to: &lineLimit) { pointer in
+            ghostty_terminal_set(
+                terminal,
+                GhosttyTerminalOption(rawValue: 28),
+                UnsafeRawPointer(pointer)
+            )
+        }
+        guard isSuccess(result) else { return false }
+        // Lowering the limit can prune historical pages immediately.
+        viewportScrollPending = false
+        cachedSnapshot = nil
+        return true
+    }
+
+    @discardableResult
     func setSelection(
         startColumn: Int,
         startRow: Int,
@@ -444,6 +470,26 @@ final class GhosttyTerminalEngine {
     var scrollbackRows: Int {
         readTerminal(GhosttyTerminalData(rawValue: 15), defaultValue: 0)
     }
+    var scrollbackMaximumLines: Int? {
+        guard let terminal else { return nil }
+        var value: UInt = 0
+        guard isSuccess(ghostty_terminal_get(
+            terminal,
+            GhosttyTerminalData(rawValue: 35),
+            &value
+        )) else { return nil }
+        return Int(exactly: value)
+    }
+    var scrollbackMaximumBytes: Int? {
+        guard let terminal else { return nil }
+        var value: UInt = 0
+        guard isSuccess(ghostty_terminal_get(
+            terminal,
+            GhosttyTerminalData(rawValue: 34),
+            &value
+        )) else { return nil }
+        return Int(exactly: value)
+    }
 
     var visibleText: String {
         snapshot().lines.map { line in
@@ -541,34 +587,6 @@ final class GhosttyTerminalEngine {
             return cachedSnapshot
         }
 
-        var backgroundRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
-        var foregroundRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
-        // The render-state color fields describe the configured render
-        // defaults. Terminal color getters are the effective layer and include
-        // OSC 4/10/11/12 overrides from applications such as tmux and Vim.
-        let backgroundResult = ghostty_terminal_get(
-            terminal, GhosttyTerminalData(rawValue: 19), &backgroundRGB
-        )
-        let foregroundResult = ghostty_terminal_get(
-            terminal, GhosttyTerminalData(rawValue: 18), &foregroundRGB
-        )
-
-        var paletteRGB = Array(
-            repeating: GhosttyColorRgb(r: 0, g: 0, b: 0),
-            count: 256
-        )
-        let paletteResult = paletteRGB.withUnsafeMutableBufferPointer { buffer in
-            ghostty_terminal_get(
-                terminal,
-                GhosttyTerminalData(rawValue: 21),
-                buffer.baseAddress
-            )
-        }
-
-        var cursor = GhosttyRenderStateCursor()
-        cursor.size = MemoryLayout<GhosttyRenderStateCursor>.size
-        _ = ghostty_render_state_get(renderState, GhosttyRenderStateData(rawValue: 18), &cursor)
-
         let alternateScreen = isAlternateScreen
         let readAllRows = !cachedShapeMatches || dirty.rawValue == GHOSTTY_RENDER_STATE_DIRTY_FULL.rawValue || viewportChanged
         let viewportDelta = viewportTop - (cachedSnapshot?.screenTopIndex ?? viewportTop)
@@ -580,6 +598,60 @@ final class GhosttyTerminalEngine {
             && cachedSnapshot?.totalRows == max(Int(rows), totalRows)
             && cachedSnapshot?.isAlternateScreen == alternateScreen
         viewportScrollPending = false
+
+        var cursor = GhosttyRenderStateCursor()
+        cursor.size = MemoryLayout<GhosttyRenderStateCursor>.size
+        _ = ghostty_render_state_get(renderState, GhosttyRenderStateData(rawValue: 18), &cursor)
+
+        let colors: (foreground: TerminalColor, background: TerminalColor, cursor: TerminalColor, palette: [TerminalColor])
+        if canShiftViewport, let cachedSnapshot {
+            // A scroll operation does not change terminal colors. Reusing the
+            // prior values avoids reading and converting all 256 palette
+            // entries for every row crossed by a trackpad gesture.
+            colors = (
+                foreground: cachedSnapshot.defaultForeground,
+                background: cachedSnapshot.defaultBackground,
+                cursor: cachedSnapshot.cursorColor,
+                palette: cachedSnapshot.palette
+            )
+        } else {
+            var backgroundRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
+            var foregroundRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
+            // Terminal getters include effective OSC 4/10/11/12 overrides.
+            let backgroundResult = ghostty_terminal_get(
+                terminal, GhosttyTerminalData(rawValue: 19), &backgroundRGB
+            )
+            let foregroundResult = ghostty_terminal_get(
+                terminal, GhosttyTerminalData(rawValue: 18), &foregroundRGB
+            )
+            var paletteRGB = Array(
+                repeating: GhosttyColorRgb(r: 0, g: 0, b: 0),
+                count: 256
+            )
+            let paletteResult = paletteRGB.withUnsafeMutableBufferPointer { buffer in
+                ghostty_terminal_get(
+                    terminal,
+                    GhosttyTerminalData(rawValue: 21),
+                    buffer.baseAddress
+                )
+            }
+            let foreground = isSuccess(foregroundResult)
+                ? terminalColor(foregroundRGB)
+                : (configuredColors.map { terminalColor($0.foreground) } ?? .default)
+            let background = isSuccess(backgroundResult)
+                ? terminalColor(backgroundRGB)
+                : (configuredColors.map { terminalColor($0.background) } ?? .default)
+            var cursorRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
+            let cursor = isSuccess(ghostty_terminal_get(
+                terminal, GhosttyTerminalData(rawValue: 20), &cursorRGB
+            ))
+                ? terminalColor(cursorRGB)
+                : (configuredColors.map { terminalColor($0.cursor) } ?? foreground)
+            let palette = isSuccess(paletteResult)
+                ? paletteRGB.map(terminalColor)
+                : (configuredColors?.palette.map(terminalColor) ?? [])
+            colors = (foreground, background, cursor, palette)
+        }
 
         let blankLine = Array(
             repeating: TerminalCell(character: " ", style: TerminalTextStyle()),
@@ -631,23 +703,6 @@ final class GhosttyTerminalEngine {
         }
         _ = ghostty_render_state_clean(renderState)
 
-        let defaultForeground: TerminalColor = isSuccess(foregroundResult)
-            ? terminalColor(foregroundRGB)
-            : (configuredColors.map { terminalColor($0.foreground) } ?? .default)
-        let defaultBackground: TerminalColor = isSuccess(backgroundResult)
-            ? terminalColor(backgroundRGB)
-            : (configuredColors.map { terminalColor($0.background) } ?? .default)
-        let cursorColor: TerminalColor
-        var cursorRGB = GhosttyColorRgb(r: 0, g: 0, b: 0)
-        cursorColor = isSuccess(ghostty_terminal_get(
-            terminal, GhosttyTerminalData(rawValue: 20), &cursorRGB
-        ))
-            ? terminalColor(cursorRGB)
-            : (configuredColors.map { terminalColor($0.cursor) } ?? defaultForeground)
-        let palette: [TerminalColor] = isSuccess(paletteResult)
-            ? paletteRGB.map(terminalColor)
-            : (configuredColors?.palette.map(terminalColor) ?? [])
-
         let snapshot = TerminalGridSnapshot(
             columns: Int(columns),
             rows: Int(rows),
@@ -658,10 +713,10 @@ final class GhosttyTerminalEngine {
             cursorColumn: cursor.viewport_has_value ? Int(cursor.viewport_x) : 0,
             cursorVisible: cursor.visible,
             isAlternateScreen: alternateScreen,
-            defaultForeground: defaultForeground,
-            defaultBackground: defaultBackground,
-            cursorColor: cursorColor,
-            palette: palette
+            defaultForeground: colors.foreground,
+            defaultBackground: colors.background,
+            cursorColor: colors.cursor,
+            palette: colors.palette
         )
         cachedSnapshot = snapshot
         return snapshot

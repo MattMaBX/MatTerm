@@ -156,6 +156,7 @@ struct MatTermApp: App {
 
         Settings {
             SettingsView()
+                .environmentObject(appState)
                 .environmentObject(terminalAppearance)
                 .environmentObject(preferences)
                 .environmentObject(shortcutStore)

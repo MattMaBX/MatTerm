@@ -843,6 +843,7 @@ private struct EmptySessionView: View {
 }
 
 struct SettingsView: View {
+    @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var terminalAppearance: TerminalAppearance
     @EnvironmentObject private var preferences: AppPreferences
     @EnvironmentObject private var shortcutStore: ShortcutStore
@@ -867,10 +868,26 @@ struct SettingsView: View {
 
             Section(preferences.text(.terminal)) {
                 LabeledContent(preferences.text(.defaultShell), value: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
-                LabeledContent(
-                    preferences.text(.scrollback),
-                    value: preferences.language == .simplifiedChinese ? "240,000 个字符" : "240,000 characters"
-                )
+                LabeledContent(preferences.text(.scrollback)) {
+                    HStack(spacing: 8) {
+                        TextField("", value: $preferences.scrollbackLineLimit, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .multilineTextAlignment(.trailing)
+                            .monospacedDigit()
+                            .frame(width: 110)
+                            .accessibilityLabel(preferences.text(.scrollback))
+                        Stepper(
+                            "",
+                            value: $preferences.scrollbackLineLimit,
+                            in: AppPreferences.scrollbackLineLimitRange,
+                            step: 1_000
+                        )
+                        .labelsHidden()
+                        Text(preferences.language == .simplifiedChinese ? "行" : "lines")
+                            .foregroundStyle(.secondary)
+                            .frame(width: 34, alignment: .leading)
+                    }
+                }
                 Picker(preferences.text(.colorScheme), selection: $terminalAppearance.theme) {
                     ForEach(TerminalTheme.allCases) { theme in
                         HStack(spacing: 8) {
@@ -935,6 +952,12 @@ struct SettingsView: View {
         .frame(width: 570, height: 640)
         .padding()
         .background(SettingsWindowConfigurationView())
+        .onAppear {
+            appState.configureScrollback(maxLines: preferences.scrollbackLineLimit)
+        }
+        .onChange(of: preferences.scrollbackLineLimit) { _, maxLines in
+            appState.configureScrollback(maxLines: maxLines)
+        }
     }
 }
 
