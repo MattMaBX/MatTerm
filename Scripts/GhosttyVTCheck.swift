@@ -19,6 +19,24 @@ enum GhosttyVTCheck {
             "Configured row limit was preempted by a byte limit"
         )
 
+        var wheelAccumulator = TerminalMouseWheelAccumulator()
+        precondition(
+            wheelAccumulator.consume(delta: 24, isPrecise: true, lineHeight: 16) == 0,
+            "Precise wheel deltas were not accumulated"
+        )
+        precondition(
+            wheelAccumulator.consume(delta: 56, isPrecise: true, lineHeight: 16) == 1,
+            "Precise wheel distance did not map to one tmux wheel event"
+        )
+        precondition(
+            wheelAccumulator.consume(delta: -80, isPrecise: true, lineHeight: 16) == -1,
+            "Reverse precise wheel distance did not preserve direction"
+        )
+        precondition(
+            wheelAccumulator.consume(delta: 1, isPrecise: false, lineHeight: 16) == 1,
+            "Physical mouse wheel ticks were incorrectly throttled"
+        )
+
         var palette = Array(repeating: GhosttyColorRgb(r: 0, g: 0, b: 0), count: 256)
         palette[1] = GhosttyColorRgb(r: 255, g: 16, b: 32)
         engine.configureColors(TerminalColorConfiguration(

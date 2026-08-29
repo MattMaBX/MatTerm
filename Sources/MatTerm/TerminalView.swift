@@ -389,6 +389,7 @@ private final class TerminalGridView: NSTextView {
     private var cursorBlinkOn = true
     private var lastMouseTracking: TerminalMouseTracking?
     private var pressedMouseButton: Int?
+    private var terminalMouseWheelAccumulator = TerminalMouseWheelAccumulator()
     private var selectionAnchor: TerminalCellPosition?
     private var selectionBase: TerminalCellPosition?
     private var selectionRectangle = false
@@ -429,6 +430,7 @@ private final class TerminalGridView: NSTextView {
         guard let session else { return }
         if lastMouseTracking != session.mouseTracking {
             lastMouseTracking = session.mouseTracking
+            terminalMouseWheelAccumulator.reset()
             if session.mouseTracking == .off { pressedMouseButton = nil }
         }
         TerminalMouseMotionCoordinator.shared.update(self)
@@ -1359,7 +1361,19 @@ private final class TerminalGridView: NSTextView {
         focus()
         let delta = abs(event.scrollingDeltaY) > .ulpOfOne ? event.scrollingDeltaY : event.deltaY
         guard abs(delta) > .ulpOfOne else { return }
-        sendMouse(delta > 0 ? .scrollUp : .scrollDown, event: event, anyButtonPressed: false)
+        let wheelEvents = terminalMouseWheelAccumulator.consume(
+            delta: delta,
+            isPrecise: event.hasPreciseScrollingDeltas,
+            lineHeight: terminalAppearance?.lineHeight ?? 16
+        )
+        guard wheelEvents != 0 else { return }
+
+        let kind: TerminalMouseEventKind = wheelEvents > 0
+            ? .scrollUp
+            : .scrollDown
+        for _ in 0..<abs(wheelEvents) {
+            sendMouse(kind, event: event, anyButtonPressed: false)
+        }
     }
 
     override func paste(_ sender: Any?) { pasteClipboardContents() }
@@ -1392,7 +1406,9 @@ private final class TerminalGridView: NSTextView {
     }
 
     override func insertText(_ insertString: Any, replacementRange: NSRange) {
-        if let text = insertString as? String { session?.send(text) }
+        guard let text = insertString as? String, !text.isEmpty else { return }
+        returnToLiveEndForTerminalInput()
+        session?.send(text)
     }
 
     override func keyDown(with event: NSEvent) {
@@ -1409,11 +1425,18 @@ private final class TerminalGridView: NSTextView {
         if event.modifierFlags.contains(.control),
            let scalar = event.charactersIgnoringModifiers?.unicodeScalars.first {
             let value = scalar.value
-            if value == 0x20 { session.send("\0"); return }
+            if value == 0x20 {
+                returnToLiveEndForTerminalInput()
+                session.send("\0")
+                return
+            }
             if (0x40...0x7F).contains(value), let controlScalar = UnicodeScalar(value & 0x1F) {
-                session.send(String(controlScalar)); return
+                returnToLiveEndForTerminalInput()
+                session.send(String(controlScalar))
+                return
             }
         }
+        returnToLiveEndForTerminalInput()
         if let sequence = escapeSequence(for: event) {
             session.send(sequence)
         } else if event.modifierFlags.contains(.option) {
@@ -1433,7 +1456,28 @@ private final class TerminalGridView: NSTextView {
 
     private func pasteClipboardContents() {
         guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        returnToLiveEndForTerminalInput()
         session?.paste(text)
+    }
+
+    /// A normal shell's scrollback is a read-only view. Returning to the live
+    /// end before sending input keeps the prompt visible without changing the
+    /// input behavior of tmux, Vim, or other mouse-tracking applications.
+    private func returnToLiveEndForTerminalInput() {
+        guard let session,
+              session.mouseTracking == .off,
+              let snapshot,
+              !snapshot.isAlternateScreen,
+              !isAtBottom else { return }
+
+        // Ghostty and AppKit keep independent viewport positions. Suppress
+        // the bounds observer until both point at the live end; otherwise it
+        // can read the old native position and scroll Ghostty back up.
+        session.scrollToBottom()
+        synchronizingNativeViewport = true
+        scrollDocumentToBottom()
+        synchronizingNativeViewport = false
+        updateContent()
     }
 
     private func copySelection() {

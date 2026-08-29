@@ -662,6 +662,18 @@ final class AppState: ObservableObject {
         window.makeKeyAndOrderFront(nil)
     }
 
+    func toggleMainWindowFullScreen() {
+        let settingsWindowIdentifier = "com_apple_SwiftUI_Settings_window"
+        let discoveredWindow = NSApp.windows.first(where: {
+            $0.identifier?.rawValue == "com.matterm.main-window"
+        }) ?? NSApp.windows.first(where: {
+            $0.identifier?.rawValue != settingsWindowIdentifier && $0.title == "MatTerm"
+        })
+        guard let window = cachedMainWindow ?? discoveredWindow else { return }
+        trackMainWindow(window)
+        window.toggleFullScreen(nil)
+    }
+
     private func trackMainWindow(_ window: NSWindow) {
         guard cachedMainWindow !== window else { return }
         if let mainWindowCloseObserver {

@@ -852,8 +852,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section(preferences.text(.application)) {
-                LabeledContent(preferences.text(.version), value: "0.1.1")
-                LabeledContent(preferences.text(.minimumMacOS), value: "26.0")
+                LabeledContent(preferences.text(.version), value: "0.2.0")
                 Picker(preferences.text(.language), selection: $preferences.language) {
                     Text(preferences.text(.english)).tag(AppLanguage.english)
                     Text(preferences.text(.simplifiedChinese)).tag(AppLanguage.simplifiedChinese)
@@ -867,7 +866,6 @@ struct SettingsView: View {
             }
 
             Section(preferences.text(.terminal)) {
-                LabeledContent(preferences.text(.defaultShell), value: ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh")
                 LabeledContent(preferences.text(.scrollback)) {
                     HStack(spacing: 8) {
                         TextField("", value: $preferences.scrollbackLineLimit, format: .number)

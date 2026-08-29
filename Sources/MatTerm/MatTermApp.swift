@@ -152,6 +152,13 @@ struct MatTermApp: App {
                     .keyboardShortcut(KeyEquivalent(Character(String(index + 1))), modifiers: [.command])
                 }
             }
+
+            CommandGroup(after: .windowArrangement) {
+                Button(preferences.text(.toggleFullScreen)) {
+                    appState.toggleMainWindowFullScreen()
+                }
+                .keyboardShortcut("f", modifiers: [.command, .control])
+            }
         }
 
         Settings {

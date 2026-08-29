@@ -52,6 +52,36 @@ enum TerminalMouseEventKind: Equatable {
     case scrollDown
 }
 
+struct TerminalMouseWheelAccumulator {
+    private var remainder: CGFloat = 0
+
+    mutating func reset() {
+        remainder = 0
+    }
+
+    mutating func consume(delta: CGFloat, isPrecise: Bool, lineHeight: CGFloat) -> Int {
+        guard abs(delta) > .ulpOfOne else { return 0 }
+        guard isPrecise else {
+            remainder = 0
+            return delta > 0 ? 1 : -1
+        }
+
+        if remainder != 0, (remainder > 0) != (delta > 0) {
+            remainder = 0
+        }
+        remainder += delta
+
+        // tmux's default wheel bindings move five rows at a time.
+        let threshold = max(1, lineHeight) * 5
+        let eventCount = Int(abs(remainder) / threshold)
+        guard eventCount > 0 else { return 0 }
+
+        let direction: CGFloat = remainder > 0 ? 1 : -1
+        remainder -= direction * CGFloat(eventCount) * threshold
+        return Int(direction) * eventCount
+    }
+}
+
 struct TerminalTextStyle: Hashable {
     var foreground: TerminalColor = .default
     var background: TerminalColor = .default

@@ -39,8 +39,6 @@ enum AppText {
     case previousTab
     case selectTab(Int)
     case version
-    case minimumMacOS
-    case defaultShell
     case scrollback
     case colorScheme
     case font
@@ -72,6 +70,7 @@ enum AppText {
     case splitBelow
     case showSSHSelector
     case toggleWindow
+    case toggleFullScreen
     case chooseSSHHost
     case sshHost
     case name
@@ -120,8 +119,6 @@ enum AppText {
             case .previousTab: return "Previous Tab"
             case .selectTab(let index): return "Select Tab \(index)"
             case .version: return "Version"
-            case .minimumMacOS: return "Minimum macOS"
-            case .defaultShell: return "Default shell"
             case .scrollback: return "Scrollback"
             case .colorScheme: return "Color scheme"
             case .font: return "Font"
@@ -153,6 +150,7 @@ enum AppText {
             case .splitBelow: return "Split Below"
             case .showSSHSelector: return "Show SSH Profile Selector"
             case .toggleWindow: return "Show/Hide MatTerm"
+            case .toggleFullScreen: return "Toggle Full Screen"
             case .chooseSSHHost: return "Choose SSH Host"
             case .sshHost: return "SSH Host"
             case .name: return "Name"
@@ -200,8 +198,6 @@ enum AppText {
             case .previousTab: return "上一个标签页"
             case .selectTab(let index): return "选择标签页 \(index)"
             case .version: return "版本"
-            case .minimumMacOS: return "最低 macOS 版本"
-            case .defaultShell: return "默认 Shell"
             case .scrollback: return "回滚缓冲区"
             case .colorScheme: return "配色方案"
             case .font: return "字体"
@@ -233,6 +229,7 @@ enum AppText {
             case .splitBelow: return "向下分屏"
             case .showSSHSelector: return "显示 SSH 配置选择器"
             case .toggleWindow: return "显示/隐藏 MatTerm"
+            case .toggleFullScreen: return "切换全屏模式"
             case .chooseSSHHost: return "选择 SSH 主机"
             case .sshHost: return "SSH 主机"
             case .name: return "名称"

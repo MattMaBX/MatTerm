@@ -6,7 +6,7 @@
 
 MatTerm is a focused terminal app for macOS users who work locally and over SSH. It uses a native SwiftUI and AppKit interface, the system PTY, and the system OpenSSH client to keep the app responsive, lightweight, and closely integrated with macOS.
 
-Current release: **v0.1.1**
+Current release: **v0.2.0**
 
 ## Features
 
@@ -24,7 +24,7 @@ Current release: **v0.1.1**
 - Window size and position restoration, always-on-top mode, and a global show/hide shortcut.
 - English and Simplified Chinese UI.
 
-Port forwarding and arbitrary split layouts beyond the current directional pane workflow are not part of v0.1.1.
+Port forwarding and arbitrary split layouts beyond the current directional pane workflow are not part of v0.2.0.
 
 ## Requirements
 
@@ -45,7 +45,14 @@ open Build/MatTerm.app
 
 The build script runs Ghostty VT core, PTY, multiplexer, appearance, and app-level checks, compiles both supported CPU architectures, creates an ad-hoc signed `Build/MatTerm.app`, and embeds the standard macOS icon. `Scripts/package-app.sh` creates a universal ZIP in `Artifacts/`.
 
-GitHub Actions runs the same build on `macos-26`, uploads the ZIP as an Actions artifact, and creates a Release when a tag such as `v0.1.1` is pushed. To produce a Gatekeeper-friendly release, configure these repository secrets: `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`. When all are present, the workflow performs Developer ID signing, notarization, stapling, and then uploads the notarized ZIP. Without them, it intentionally produces an ad-hoc signed ZIP.
+GitHub Actions runs the same build on `macos-26`, uploads the ZIP as an Actions artifact, and creates a Release when a tag such as `v0.2.0` is pushed. To produce a Gatekeeper-friendly release, configure these repository secrets: `APPLE_CERTIFICATE_P12_BASE64`, `APPLE_CERTIFICATE_PASSWORD`, `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_TEAM_ID`, and `APPLE_APP_PASSWORD`. When all are present, the workflow performs Developer ID signing, notarization, stapling, and then uploads the notarized ZIP. Without them, it intentionally produces an ad-hoc signed ZIP.
+
+### v0.2.0
+
+- Fixed ANSI color fills, terminal text contrast, and line-spacing alignment.
+- Made normal-terminal scrollback buffered, smoother, and more reliable during long output.
+- Added an effective configurable scrollback limit, text selection and copy support, and Cmd+Ctrl+F full-screen handling.
+- Matched tmux trackpad scrolling to ordinary terminal scrolling and return ordinary local or SSH shells to the live prompt when input begins.
 
 ### v0.1.1
 

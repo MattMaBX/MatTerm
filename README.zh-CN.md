@@ -6,7 +6,7 @@
 
 MatTerm 面向需要频繁使用本地终端和 SSH 的 macOS 用户。它使用原生 SwiftUI 和 AppKit 界面、系统 PTY 以及系统 OpenSSH 客户端，保持响应流畅、资源占用较低，并与 macOS 的窗口和输入体系保持一致。
 
-当前版本：**v0.1.1**
+当前版本：**v0.2.0**
 
 ## 功能
 
@@ -24,7 +24,7 @@ MatTerm 面向需要频繁使用本地终端和 SSH 的 macOS 用户。它使用
 - 记忆窗口大小和位置，支持窗口置顶以及全局显示/隐藏快捷键。
 - 支持英文和简体中文界面。
 
-v0.1.1 暂不包含端口转发；分屏目前采用方向性子窗口工作流。
+v0.2.0 暂不包含端口转发；分屏目前采用方向性子窗口工作流。
 
 ## 系统要求
 
@@ -45,7 +45,14 @@ open Build/MatTerm.app
 
 构建脚本会先执行 Ghostty VT 核心、PTY、多路复用、外观和 App 级检查，分别编译两种 CPU 架构，生成标准 macOS 图标，并对 `Build/MatTerm.app` 进行临时签名。`Scripts/package-app.sh` 会在 `Artifacts/` 中生成 universal ZIP。
 
-GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.1.1` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
+GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.2.0` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
+
+### v0.2.0
+
+- 修复 ANSI 色块、终端文本对比度和行距对齐问题。
+- 为普通终端加入回滚缓冲，使长输出场景下的滚动更流畅、稳定。
+- 新增有效的回滚行数设置、文本选择与复制支持，以及 Cmd+Ctrl+F 全屏快捷键响应。
+- 让 tmux 触控板滚动速度与普通终端一致，并在普通本地或 SSH shell 开始输入时自动回到实时提示符。
 
 ### v0.1.1
 
