@@ -1,106 +1,105 @@
-# MatTerm
+<p align="center">
+  <img src="Resources/AppIcon.svg" width="112" alt="MatTerm 图标">
+</p>
 
-> 使用 Swift 构建的原生 macOS 终端与 SSH 工作区。
+<h1 align="center">MatTerm</h1>
 
-[English](README.md)
+<p align="center">为 macOS 打造的原生终端工作区。</p>
 
-MatTerm 面向需要频繁使用本地终端和 SSH 的 macOS 用户。它使用原生 SwiftUI 和 AppKit 界面、系统 PTY 以及系统 OpenSSH 客户端，保持响应流畅、资源占用较低，并与 macOS 的窗口和输入体系保持一致。
+<p align="center">
+  <a href="https://github.com/MattMaBX/MatTerm/releases">下载</a>
+  &nbsp;|&nbsp;
+  <a href="https://github.com/MattMaBX/MatTerm/issues">反馈问题</a>
+  &nbsp;|&nbsp;
+  <a href="README.md">English</a>
+</p>
 
-当前版本：**v0.2.0**
+MatTerm 面向需要在本地 shell 与 SSH 主机之间频繁切换的 macOS 用户。它使用原生 SwiftUI 和 AppKit 界面、真实 PTY、系统 OpenSSH 客户端以及 Ghostty VT 核心，在保留现代终端工作流的同时，提供贴合 macOS 的使用体验。
 
-## 功能
+**当前版本：** v0.2.0
 
-- 基于真实 PTY 的本地终端会话。
-- 从 `~/.ssh/config` 导入并同步 SSH 配置。
-- 在 App 中新增或编辑的配置会写回本机 OpenSSH 配置文件。
-- 支持 ANSI 颜色、256 色和 24 位真彩色渲染。
-- 基于 Ghostty VT 核心实现终端解析、渲染、滚动和鼠标跟踪。
-- 普通终端模式支持原生回滚滚动和可见滚动条。
-- 内置 Tabby 社区配色方案。
-- 支持设置字体、字号、额外行间距、光标闪烁、背景透明度和模糊程度。
-- 使用自适应标签宽度的紧凑标签栏，并将新建标签按钮独立放置。
-- 支持在设置中修改 SSH 配置选择器和分屏快捷键。
-- 支持向左、向右、向上、向下分屏，每个子终端独立聚焦并独立显示光标。
-- 记忆窗口大小和位置，支持窗口置顶以及全局显示/隐藏快捷键。
-- 支持英文和简体中文界面。
+## 核心特性
 
-v0.2.0 暂不包含端口转发；分屏目前采用方向性子窗口工作流。
+- **本地与 SSH 工作区。** 可新建本地终端标签页，并通过与 `~/.ssh/config` 同步的配置快速连接远程主机。
+- **可靠的终端渲染。** 支持 ANSI、256 色和真彩色输出，提供可配置回滚缓冲、文本选择与复制，以及适合长输出的原生缓冲滚动。
+- **兼容复用器交互。** 当 tmux、Vim 或 screen 接管终端时，鼠标跟踪、分屏大小调整和滚轮事件仍会正确传递给它们。
+- **标签页与方向分屏。** 支持向左、向右、向上、向下创建子终端，每个窗格独立处理焦点和光标状态。
+- **面向日常使用。** 内置 Tabby 主题，可调字体、行距、光标、透明度和模糊效果，并记住窗口布局。
+- **macOS 原生体验。** 支持全屏、标准快捷键、`arm64` 与 `x86_64` 通用构建，以及简体中文和英文界面。
 
-## 系统要求
+## 获取 MatTerm
 
-- macOS 26.0 或更高版本。
-- 从源码构建需要 Swift 6.1 或更高版本，以及 macOS 26 SDK。
-- 发布 App 同时包含 `arm64` 和 `x86_64` 两种架构。
+### 下载发布版本
 
-## 构建和运行
+1. 在 [Releases](https://github.com/MattMaBX/MatTerm/releases) 下载最新的通用 ZIP。
+2. 解压后将 `MatTerm.app` 移动到 `/Applications`。
+3. 正常打开应用。若 macOS 对临时签名构建显示 Gatekeeper 提示，请按住 Control 点击应用，选择 **打开**，再确认。
+
+应用要求 macOS 26.0 或更高版本，同时包含 Apple Silicon 与 Intel 架构，在 Apple Silicon Mac 上不需要 Rosetta。
+
+### 从源码构建
+
+构建需要 Swift 6.1 或更高版本，以及 macOS 26 SDK。
 
 ```sh
-git clone <repository-url>
+git clone https://github.com/MattMaBX/MatTerm.git
 cd MatTerm
 ./Scripts/build-app.sh
-./Scripts/validate-app.sh
-./Scripts/package-app.sh
 open Build/MatTerm.app
 ```
 
-构建脚本会先执行 Ghostty VT 核心、PTY、多路复用、外观和 App 级检查，分别编译两种 CPU 架构，生成标准 macOS 图标，并对 `Build/MatTerm.app` 进行临时签名。`Scripts/package-app.sh` 会在 `Artifacts/` 中生成 universal ZIP。
-
-GitHub Actions 会在 `macos-26` runner 上执行相同的构建流程，上传 ZIP 工件；推送类似 `v0.2.0` 的 tag 时还会自动创建 GitHub Release。若要生成 Gatekeeper 可以直接接受的发布版本，请在仓库 Secrets 中配置：`APPLE_CERTIFICATE_P12_BASE64`、`APPLE_CERTIFICATE_PASSWORD`、`APPLE_SIGNING_IDENTITY`、`APPLE_ID`、`APPLE_TEAM_ID` 和 `APPLE_APP_PASSWORD`。全部配置后，workflow 会执行 Developer ID 签名、公证、票据装订并上传经过公证的 ZIP。没有这些 Secrets 时，workflow 会明确生成临时签名 ZIP。
-
-### v0.2.0
-
-- 修复 ANSI 色块、终端文本对比度和行距对齐问题。
-- 为普通终端加入回滚缓冲，使长输出场景下的滚动更流畅、稳定。
-- 新增有效的回滚行数设置、文本选择与复制支持，以及 Cmd+Ctrl+F 全屏快捷键响应。
-- 让 tmux 触控板滚动速度与普通终端一致，并在普通本地或 SSH shell 开始输入时自动回到实时提示符。
-
-### v0.1.1
-
-- 在保持现有 MatTerm 界面的同时，使用 Ghostty VT 核心重写终端视口逻辑。
-- 修复普通终端滚轮回滚，并增加原生可见滚动条。
-- 保持 tmux、Vim 和 screen 的鼠标事件由终端程序接收。
-- 优化 ANSI、256 色和真彩色渲染，消除背景透出造成的竖线伪影。
-- 减少滚动和分屏交互时的重复重绘。
-
-如果只需要编译：
+构建完成后，会在 `Build/MatTerm.app` 生成带有临时签名的通用 app bundle。检查已有 bundle：
 
 ```sh
-swift build -c release
+./Scripts/validate-app.sh Build/MatTerm.app
 ```
 
-MatTerm 当前面向个人使用和源码分发，不包含 Mac App Store 上架配置。
+## 常用快捷键
 
-### 安装 GitHub 构建版本
+| 操作 | 默认快捷键 |
+| --- | --- |
+| 新建本地标签页 | `Cmd+T` |
+| 关闭标签页 | `Cmd+W` |
+| SSH 配置选择器 | `Cmd+Shift+O` |
+| 向左、右、上、下分屏 | `Cmd+Shift+H` / `Cmd+Shift+L` / `Cmd+Shift+K` / `Cmd+Shift+J` |
+| 下一个或上一个标签页 | `Cmd+Shift+}` 或 `Cmd+Shift+{` |
+| 全屏 | `Cmd+Ctrl+F` |
 
-对于 GitHub Actions 工件或 Release ZIP：
+SSH 配置选择器和分屏快捷键可在设置中修改。
 
-1. 下载并解压 ZIP。
-2. 将 `MatTerm.app` 移动到 `/Applications`。
-3. 第一次启动时按住 Control 点击 App，选择 **打开**，然后确认 **打开**。
+## SSH、凭据与配置
 
-默认 workflow 使用临时签名，因为仓库中不保存 Apple Developer 凭据。如果配置文档中列出的 GitHub Actions Secrets，生产 workflow 可以执行 Developer ID 签名和公证。没有公证时，Gatekeeper 可能要求第一次启动进行上述确认。App 本身是 universal，在 Apple Silicon Mac 上不需要 Rosetta。
+MatTerm 使用系统 `/usr/bin/ssh`。身份验证仍由 OpenSSH、SSH Agent 和你选择的身份文件负责；MatTerm 不保存密码或私钥。
 
-## SSH 配置
+- 应用启动时读取 `~/.ssh/config`，并在打开 SSH 配置选择器前刷新内容。
+- 新建或编辑配置会更新对应的 `Host` 块；没有匹配项时会追加新的块。
+- MatTerm 写入配置时会保留无法识别的指令和无关的主机块。
 
-MatTerm 使用系统 OpenSSH 客户端 `/usr/bin/ssh`。
+如果一个主机块包含高级 OpenSSH 配置，或由多个工具共用，编辑后请检查 `~/.ssh/config`。该文件始终是配置来源，也可以随时直接修改。
 
-- App 启动时会读取最新的 `~/.ssh/config`。
-- 打开 SSH 配置选择器时，会在显示选择器前重新读取该文件。
-- 保存配置时会更新匹配的 `Host` 块；找不到时会追加新的配置块。
-- 更新配置时会保留无法由配置编辑器表示的选项以及其他无关的 `Host` 块。
-- 身份验证仍由 OpenSSH、SSH Agent 和用户选择的身份文件负责，MatTerm 不保存密码。
+## v0.2.0 更新
 
-如果已有 `Host` 块包含配置编辑器没有覆盖的高级选项，建议在使用其他 SSH 工具之前检查写回后的 `~/.ssh/config`。
+- 改进 ANSI 背景色块、文本对比度和行距对齐。
+- 重构普通终端回滚逻辑，使长输出的渲染和滚动更稳定、流畅。
+- 加入有效的回滚行数设置、原生文本选择与复制，以及 Cmd+Ctrl+F 全屏支持。
+- 让 tmux 触控板滚动更接近普通终端；在普通本地或 SSH shell 中开始输入时，视图会回到实时提示符。
 
-## 项目结构
+## 当前范围
 
-```text
-Sources/MatTerm/      应用和终端实现
-Resources/             Info.plist 和图标源文件
-Scripts/               构建和运行检查脚本
-Build/                 本机构建输出，已加入 Git 忽略
-Artifacts/             本地发布压缩包，已加入 Git 忽略
+MatTerm 有意保持聚焦。目前尚未提供专门的端口转发界面，也不支持任意拖拽和重排窗格；现阶段的方向分屏覆盖了主要的窗格工作流。
+
+## 开发
+
+提交 Pull Request 前，请运行终端回归检查：
+
+```sh
+./Scripts/check-terminal.sh all
+./Scripts/check-appearance.sh
+./Scripts/build-app.sh
+./Scripts/validate-app.sh Build/MatTerm.app
 ```
+
+欢迎通过 [GitHub Issues](https://github.com/MattMaBX/MatTerm/issues) 提交问题和功能建议。
 
 ## 许可证
 
