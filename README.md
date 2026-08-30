@@ -16,7 +16,7 @@
 
 MatTerm is a focused terminal for people who move between local shells and SSH hosts all day. It uses native SwiftUI and AppKit surfaces, a real PTY, the system OpenSSH client, and the Ghostty VT core to deliver a terminal that belongs on macOS without giving up the workflows expected from a modern terminal.
 
-**Current version:** v0.2.1
+**Current version:** v0.2.2
 
 ## Highlights
 
@@ -77,8 +77,9 @@ MatTerm uses `/usr/bin/ssh`; authentication continues to be handled by OpenSSH, 
 
 Review `~/.ssh/config` after editing a profile that shares a host block with advanced OpenSSH settings. That file remains the source of truth and can always be edited directly.
 
-## What's New in v0.2.1
+## What's New in v0.2.2
 
+- The SSH profile selector now follows the active terminal theme with an opaque, high-contrast search field and selection state.
 - The toolbar, sidebar, and empty workspace now follow the active terminal theme with readable interface contrast.
 - Simplified background customization to a single opacity control.
 - Settings can be dismissed with Escape or Cmd+W, and the tab strip stays hidden when no tabs are open.

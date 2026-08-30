@@ -78,6 +78,7 @@ struct MainView: View {
         }
         .sheet(isPresented: $appState.isSSHProfileSelectorPresented) {
             SSHProfileSelectorView(appState: appState, profileStore: profileStore)
+                .presentationBackground(terminalAppearance.theme.background)
         }
         .onAppear {
             shortcutStore.installRuntimeHandler(appState: appState, profileStore: profileStore)
@@ -908,7 +909,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section(preferences.text(.application)) {
-                LabeledContent(preferences.text(.version), value: "0.2.1")
+                LabeledContent(preferences.text(.version), value: "0.2.2")
                 Picker(preferences.text(.language), selection: $preferences.language) {
                     Text(preferences.text(.english)).tag(AppLanguage.english)
                     Text(preferences.text(.simplifiedChinese)).tag(AppLanguage.simplifiedChinese)
@@ -1039,6 +1040,7 @@ private struct SSHProfileSelectorView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var profileStore: SSHProfileStore
     @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var terminalAppearance: TerminalAppearance
     @StateObject private var selectorState = SSHProfileSelectorState()
     @FocusState private var searchIsFocused: Bool
 
@@ -1054,38 +1056,87 @@ private struct SSHProfileSelectorView: View {
     var body: some View {
         VStack(spacing: 0) {
             HStack {
-                Text(preferences.text(.chooseSSHHost)).font(.headline)
+                Text(preferences.text(.chooseSSHHost))
+                    .font(.headline)
+                    .foregroundStyle(terminalAppearance.interfaceForeground)
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .foregroundStyle(terminalAppearance.interfaceForeground)
             }
             .padding()
-            TextField(preferences.text(.searchSSHHosts), text: $selectorState.query)
-                .textFieldStyle(.roundedBorder)
+            TextField(
+                "",
+                text: $selectorState.query,
+                prompt: Text(preferences.text(.searchSSHHosts))
+                    .foregroundStyle(terminalAppearance.interfaceSecondary)
+            )
+                .textFieldStyle(.plain)
+                .foregroundStyle(terminalAppearance.interfaceForeground)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(terminalAppearance.theme.background)
+                .clipShape(RoundedRectangle(cornerRadius: 5))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(terminalAppearance.interfaceSecondary, lineWidth: 1)
+                }
                 .focused($searchIsFocused)
                 .onSubmit { connectSelectedProfile() }
                 .padding(.horizontal)
-            List(filteredProfiles) { profile in
-                Button {
-                    connect(profile)
-                } label: { ProfileRow(profile: profile) }
-                .buttonStyle(.plain)
-                .listRowBackground(
-                    profile.id == selectorState.selectedProfileID
-                        ? Color.accentColor.opacity(0.18)
-                        : Color.clear
-                )
+                .accessibilityLabel(preferences.text(.searchSSHHosts))
+            ScrollView {
+                LazyVStack(spacing: 4) {
+                    ForEach(filteredProfiles) { profile in
+                        Button {
+                            connect(profile)
+                        } label: {
+                            HStack(spacing: 8) {
+                                ProfileRow(profile: profile)
+                                Spacer(minLength: 0)
+                                if profile.id == selectorState.selectedProfileID {
+                                    Image(systemName: "checkmark")
+                                        .font(.system(size: 11, weight: .semibold))
+                                        .foregroundStyle(terminalAppearance.interfaceForeground)
+                                }
+                            }
+                            .padding(.horizontal, 8)
+                            .background(terminalAppearance.theme.background)
+                            .clipShape(RoundedRectangle(cornerRadius: 5))
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 5)
+                                    .stroke(
+                                        profile.id == selectorState.selectedProfileID
+                                            ? terminalAppearance.interfaceForeground
+                                            : .clear,
+                                        lineWidth: 2
+                                    )
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
             }
+            .background(terminalAppearance.theme.background)
             .overlay {
                 if filteredProfiles.isEmpty {
-                    Text(preferences.text(.noMatchingSSHHosts)).foregroundStyle(.secondary)
+                    Text(preferences.text(.noMatchingSSHHosts))
+                        .foregroundStyle(terminalAppearance.interfaceSecondary)
                 }
             }
         }
         .frame(width: 430, height: 430)
         .padding(.bottom, 8)
+        .background(terminalAppearance.theme.background)
+        .foregroundStyle(terminalAppearance.interfaceForeground)
+        .tint(terminalAppearance.interfaceForeground)
+        .environment(\.colorScheme, terminalAppearance.isDarkTheme ? .dark : .light)
         .background(
             SelectorWindowAccessor { window in
+                configureWindow(window)
                 selectorState.installKeyboardMonitor(
                     for: window,
                     profiles: { filteredProfiles },
@@ -1109,6 +1160,12 @@ private struct SSHProfileSelectorView: View {
         .onChange(of: profileStore.profiles) { _, _ in
             selectorState.selectFirst(from: filteredProfiles)
         }
+    }
+
+    private func configureWindow(_ window: NSWindow?) {
+        guard let window else { return }
+        window.isOpaque = true
+        window.backgroundColor = terminalAppearance.theme.appKitBackground
     }
 
     private func connectSelectedProfile() {
