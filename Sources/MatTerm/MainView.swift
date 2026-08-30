@@ -66,6 +66,10 @@ struct MainView: View {
                 alwaysOnTop: preferences.alwaysOnTop
             )
         )
+        .background {
+            TerminalBackdropView(appearance: terminalAppearance)
+                .allowsHitTesting(false)
+        }
         .sheet(item: $viewState.editingProfile) { profile in
             ProfileEditorView(profile: profile) { savedProfile in
                 profileStore.upsert(savedProfile)
@@ -93,7 +97,9 @@ struct MainView: View {
                 .buttonStyle(.plain)
             }
             ToolbarItem(placement: .principal) {
-                CompactTabStrip(appState: appState)
+                if !appState.workspaces.isEmpty {
+                    CompactTabStrip(appState: appState)
+                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button { appState.openLocalSession() } label: {
@@ -106,7 +112,7 @@ struct MainView: View {
             }
         }
         .toolbarBackground(
-            terminalAppearance.theme.background,
+            terminalAppearance.effectiveBackground,
             for: .windowToolbar
         )
         .toolbarBackground(.visible, for: .windowToolbar)
@@ -117,7 +123,7 @@ struct MainView: View {
     }
 
     private var toolbarForeground: Color {
-        terminalAppearance.isDarkTheme ? .white : .black
+        terminalAppearance.interfaceForeground
     }
 }
 
@@ -384,15 +390,55 @@ private struct SettingsWindowConfigurationView: NSViewRepresentable {
 }
 
 private final class SettingsWindowConfigurationNSView: NSView {
+    private var keyboardMonitor: Any?
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         configureWindow()
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow !== window {
+            removeKeyboardMonitor()
+        }
+        super.viewWillMove(toWindow: newWindow)
     }
 
     func configureWindow() {
         guard let window else { return }
         // Keep settings above the main terminal even when the latter is floating.
         window.level = .modalPanel
+        installKeyboardMonitor(for: window)
+    }
+
+    private func installKeyboardMonitor(for window: NSWindow) {
+        guard keyboardMonitor == nil else { return }
+        keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak window] event in
+            guard let window, event.window === window else {
+                return event
+            }
+
+            // Escape has a second meaning while a shortcut recorder is active.
+            // Let that control cancel its capture before the settings window closes.
+            if let recorder = window.firstResponder as? ShortcutRecorderButton,
+               recorder.isRecording {
+                return event
+            }
+
+            let isEscape = event.keyCode == UInt16(kVK_Escape)
+            let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isCommandW = event.keyCode == UInt16(kVK_ANSI_W) && flags.contains(.command)
+            guard isEscape || isCommandW else { return event }
+
+            window.performClose(nil)
+            return nil
+        }
+    }
+
+    private func removeKeyboardMonitor() {
+        guard let keyboardMonitor else { return }
+        NSEvent.removeMonitor(keyboardMonitor)
+        self.keyboardMonitor = nil
     }
 }
 
@@ -411,7 +457,7 @@ private struct SidebarView: View {
     @ObservedObject var appState: AppState
     @ObservedObject var profileStore: SSHProfileStore
     @EnvironmentObject private var preferences: AppPreferences
-    @Environment(\.colorScheme) private var systemColorScheme
+    @EnvironmentObject private var terminalAppearance: TerminalAppearance
     @Binding var editingProfile: SSHProfile?
     @Binding var importNotice: ImportNotice?
 
@@ -439,7 +485,7 @@ private struct SidebarView: View {
             Section(preferences.text(.sshHosts)) {
                 if profileStore.profiles.isEmpty {
                     Text(preferences.text(.noSavedHosts))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(terminalAppearance.interfaceSecondary)
                         .font(.callout)
                 } else {
                     ForEach(profileStore.profiles) { profile in
@@ -460,6 +506,8 @@ private struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        .scrollContentBackground(.hidden)
+        .background(Color.clear)
         .safeAreaInset(edge: .bottom) {
             HStack(spacing: 12) {
                 Button { editingProfile = SSHProfile() } label: {
@@ -487,10 +535,11 @@ private struct SidebarView: View {
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
-            .background(.bar)
+            .background(Color.clear)
         }
         .navigationTitle(preferences.text(.application))
-        .environment(\.colorScheme, resolvedColorScheme)
+        .foregroundStyle(terminalAppearance.interfaceForeground)
+        .environment(\.colorScheme, terminalAppearance.isDarkTheme ? .dark : .light)
         .alert(item: $importNotice) { notice in
             Alert(
                 title: Text(notice.title(using: preferences)),
@@ -500,13 +549,6 @@ private struct SidebarView: View {
         }
     }
 
-    private var resolvedColorScheme: ColorScheme {
-        switch preferences.sidebarAppearance {
-        case .dark: return .dark
-        case .light: return .light
-        case .system: return systemColorScheme
-        }
-    }
 }
 
 private struct SessionRow: View {
@@ -518,20 +560,24 @@ private struct SessionRow: View {
         HStack(spacing: 9) {
             Image(systemName: workspace.iconName)
                 .frame(width: 18)
-                .foregroundStyle(isSelected ? .primary : .secondary)
+                .foregroundStyle(isSelected ? terminalAppearance.interfaceForeground : terminalAppearance.interfaceSecondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(workspace.title).lineLimit(1)
+                Text(workspace.title)
+                    .lineLimit(1)
+                    .foregroundStyle(terminalAppearance.interfaceForeground)
                 Text(statusLabel)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(terminalAppearance.interfaceSecondary)
             }
             Spacer(minLength: 0)
             Circle().fill(statusColor).frame(width: 7, height: 7)
         }
         .padding(.vertical, 4)
         .contentShape(Rectangle())
-        .listRowBackground(isSelected ? Color.accentColor.opacity(0.18) : .clear)
+        .listRowBackground(isSelected ? terminalAppearance.interfaceForeground.opacity(0.16) : .clear)
     }
+
+    @EnvironmentObject private var terminalAppearance: TerminalAppearance
 
     private var status: SessionStatus { workspace.status }
 
@@ -555,15 +601,20 @@ private struct SessionRow: View {
 
 private struct ProfileRow: View {
     let profile: SSHProfile
+    @EnvironmentObject private var terminalAppearance: TerminalAppearance
 
     var body: some View {
         HStack(spacing: 9) {
-            Image(systemName: "network").frame(width: 18).foregroundStyle(.secondary)
+            Image(systemName: "network")
+                .frame(width: 18)
+                .foregroundStyle(terminalAppearance.interfaceSecondary)
             VStack(alignment: .leading, spacing: 2) {
-                Text(profile.name).lineLimit(1)
+                Text(profile.name)
+                    .lineLimit(1)
+                    .foregroundStyle(terminalAppearance.interfaceForeground)
                 Text(profile.subtitle)
                     .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(terminalAppearance.interfaceSecondary)
                     .lineLimit(1)
             }
         }
@@ -637,10 +688,7 @@ private struct ActivePaneView: View {
     private var isFocused: Bool { workspace.focusedSessionID == session.id }
 
     var body: some View {
-        ZStack {
-            TerminalBackdropView(appearance: terminalAppearance)
-                .allowsHitTesting(false)
-            VStack(spacing: 0) {
+        VStack(spacing: 0) {
                 TerminalView(
                     session: session,
                     isFocusedPane: isFocused,
@@ -657,7 +705,6 @@ private struct ActivePaneView: View {
                 }
                 .padding(.horizontal, 12)
                 .frame(height: 28)
-            }
         }
         .clipped()
     }
@@ -801,7 +848,7 @@ private struct TabItem: View {
     }
 
     private var toolbarForeground: Color {
-        terminalAppearance.isDarkTheme ? .white : .black
+        terminalAppearance.interfaceForeground
     }
 
     fileprivate static func compactTitleWidth(for title: String, isSelected: Bool) -> CGFloat {
@@ -829,16 +876,22 @@ private struct TabItem: View {
 
 private struct EmptySessionView: View {
     @EnvironmentObject private var preferences: AppPreferences
+    @EnvironmentObject private var terminalAppearance: TerminalAppearance
     let onOpen: () -> Void
 
     var body: some View {
         VStack(spacing: 14) {
-            Image(systemName: "terminal.fill").font(.system(size: 34)).foregroundStyle(.secondary)
-            Text(preferences.text(.noActiveSession)).font(.title3.weight(.medium))
+            Image(systemName: "terminal.fill")
+                .font(.system(size: 34))
+                .foregroundStyle(terminalAppearance.interfaceSecondary)
+            Text(preferences.text(.noActiveSession))
+                .font(.title3.weight(.medium))
+                .foregroundStyle(terminalAppearance.interfaceForeground)
             Button(preferences.text(.openLocalTab), action: onOpen)
+                .tint(terminalAppearance.interfaceForeground)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color.clear)
     }
 }
 
@@ -858,11 +911,6 @@ struct SettingsView: View {
                     Text(preferences.text(.simplifiedChinese)).tag(AppLanguage.simplifiedChinese)
                 }
                 Toggle(preferences.text(.keepWindowOnTop), isOn: $preferences.alwaysOnTop)
-                Picker(preferences.text(.sidebarAppearance), selection: $preferences.sidebarAppearance) {
-                    Text(preferences.text(.sidebarSystem)).tag(SidebarAppearance.system)
-                    Text(preferences.text(.sidebarDark)).tag(SidebarAppearance.dark)
-                    Text(preferences.text(.sidebarLight)).tag(SidebarAppearance.light)
-                }
             }
 
             Section(preferences.text(.terminal)) {

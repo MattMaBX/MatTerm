@@ -9,14 +9,6 @@ enum AppLanguage: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum SidebarAppearance: String, CaseIterable, Identifiable {
-    case system
-    case dark
-    case light
-
-    var id: String { rawValue }
-}
-
 enum AppText {
     case sessions
     case sshHosts
@@ -53,10 +45,6 @@ enum AppText {
     case english
     case simplifiedChinese
     case keepWindowOnTop
-    case sidebarAppearance
-    case sidebarSystem
-    case sidebarDark
-    case sidebarLight
     case keyboardShortcuts
     case resetShortcuts
     case sshProfileSelector
@@ -133,10 +121,6 @@ enum AppText {
             case .english: return "English"
             case .simplifiedChinese: return "Simplified Chinese"
             case .keepWindowOnTop: return "Keep Window on Top"
-            case .sidebarAppearance: return "Sidebar Appearance"
-            case .sidebarSystem: return "System"
-            case .sidebarDark: return "Dark"
-            case .sidebarLight: return "Light"
             case .keyboardShortcuts: return "Keyboard Shortcuts"
             case .resetShortcuts: return "Reset Shortcuts"
             case .sshProfileSelector: return "SSH Profile Selector"
@@ -212,10 +196,6 @@ enum AppText {
             case .english: return "English"
             case .simplifiedChinese: return "简体中文"
             case .keepWindowOnTop: return "窗口置顶"
-            case .sidebarAppearance: return "侧边栏外观"
-            case .sidebarSystem: return "跟随系统"
-            case .sidebarDark: return "深色"
-            case .sidebarLight: return "浅色"
             case .keyboardShortcuts: return "键盘快捷键"
             case .resetShortcuts: return "恢复默认快捷键"
             case .sshProfileSelector: return "SSH 配置选择器"
@@ -265,9 +245,6 @@ final class AppPreferences: ObservableObject {
     @Published var alwaysOnTop: Bool {
         didSet { defaults.set(alwaysOnTop, forKey: Keys.alwaysOnTop) }
     }
-    @Published var sidebarAppearance: SidebarAppearance {
-        didSet { defaults.set(sidebarAppearance.rawValue, forKey: Keys.sidebarAppearance) }
-    }
     @Published var metaKeyEnabled: Bool {
         didSet { defaults.set(metaKeyEnabled, forKey: Keys.metaKeyEnabled) }
     }
@@ -290,7 +267,6 @@ final class AppPreferences: ObservableObject {
     private enum Keys {
         static let language = "application.language"
         static let alwaysOnTop = "application.alwaysOnTop"
-        static let sidebarAppearance = "application.sidebarAppearance"
         static let metaKeyEnabled = "terminal.metaKeyEnabled"
         static let scrollbackLineLimit = "terminal.scrollbackLineLimit"
     }
@@ -298,9 +274,6 @@ final class AppPreferences: ObservableObject {
     init() {
         language = AppLanguage(rawValue: defaults.string(forKey: Keys.language) ?? "") ?? .english
         alwaysOnTop = defaults.object(forKey: Keys.alwaysOnTop) as? Bool ?? false
-        sidebarAppearance = SidebarAppearance(
-            rawValue: defaults.string(forKey: Keys.sidebarAppearance) ?? ""
-        ) ?? .system
         metaKeyEnabled = defaults.object(forKey: Keys.metaKeyEnabled) as? Bool ?? true
         scrollbackLineLimit = Self.persistedScrollbackLineLimit()
     }

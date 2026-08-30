@@ -313,6 +313,27 @@ final class TerminalAppearance: ObservableObject {
         return luminance < 0.58
     }
 
+    var interfaceForeground: Color {
+        Color(nsColor: readableInterfaceColor(theme.appKitForeground, minimumContrast: 4.5))
+    }
+
+    var interfaceSecondary: Color {
+        Color(nsColor: readableInterfaceColor(theme.appKitForeground, minimumContrast: 3.0))
+    }
+
+    private func readableInterfaceColor(_ color: NSColor, minimumContrast: CGFloat) -> NSColor {
+        guard contrastRatio(color, against: theme.appKitBackground) < minimumContrast else {
+            return color
+        }
+
+        let white = NSColor.white
+        let black = NSColor.black
+        return contrastRatio(white, against: theme.appKitBackground)
+            >= contrastRatio(black, against: theme.appKitBackground)
+            ? white
+            : black
+    }
+
     // Keep the theme tint and its transparency as one composited color so
     // the terminal backdrop and native materials respond consistently.
     var effectiveBackgroundColor: NSColor {
