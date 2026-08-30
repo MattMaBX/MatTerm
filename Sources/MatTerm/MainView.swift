@@ -462,80 +462,83 @@ private struct SidebarView: View {
     @Binding var importNotice: ImportNotice?
 
     var body: some View {
-        List {
-            Section(preferences.text(.sessions)) {
-                ForEach(appState.workspaces) { workspace in
-                    Button {
-                        appState.select(workspace)
-                    } label: {
-                        SessionRow(workspace: workspace, isSelected: appState.selectedWorkspaceID == workspace.id)
-                    }
-                    .buttonStyle(.plain)
-                    .contextMenu {
-                        Button(preferences.text(.restartSession)) {
-                            workspace.sessions.forEach { appState.restart($0) }
-                        }
-                        Button(preferences.text(.closeTab), role: .destructive) {
-                            appState.closeWorkspace(id: workspace.id)
-                        }
-                    }
-                }
-            }
-
-            Section(preferences.text(.sshHosts)) {
-                if profileStore.profiles.isEmpty {
-                    Text(preferences.text(.noSavedHosts))
-                        .foregroundStyle(terminalAppearance.interfaceSecondary)
-                        .font(.callout)
-                } else {
-                    ForEach(profileStore.profiles) { profile in
+        ZStack {
+            terminalAppearance.effectiveBackground
+            List {
+                Section(preferences.text(.sessions)) {
+                    ForEach(appState.workspaces) { workspace in
                         Button {
-                            appState.openSSHSession(profile: profile)
+                            appState.select(workspace)
                         } label: {
-                            ProfileRow(profile: profile)
+                            SessionRow(workspace: workspace, isSelected: appState.selectedWorkspaceID == workspace.id)
                         }
                         .buttonStyle(.plain)
                         .contextMenu {
-                            Button(preferences.text(.edit)) { editingProfile = profile }
-                            Button(preferences.text(.delete), role: .destructive) {
-                                profileStore.delete(profile)
+                            Button(preferences.text(.restartSession)) {
+                                workspace.sessions.forEach { appState.restart($0) }
+                            }
+                            Button(preferences.text(.closeTab), role: .destructive) {
+                                appState.closeWorkspace(id: workspace.id)
+                            }
+                        }
+                    }
+                }
+
+                Section(preferences.text(.sshHosts)) {
+                    if profileStore.profiles.isEmpty {
+                        Text(preferences.text(.noSavedHosts))
+                            .foregroundStyle(terminalAppearance.interfaceSecondary)
+                            .font(.callout)
+                    } else {
+                        ForEach(profileStore.profiles) { profile in
+                            Button {
+                                appState.openSSHSession(profile: profile)
+                            } label: {
+                                ProfileRow(profile: profile)
+                            }
+                            .buttonStyle(.plain)
+                            .contextMenu {
+                                Button(preferences.text(.edit)) { editingProfile = profile }
+                                Button(preferences.text(.delete), role: .destructive) {
+                                    profileStore.delete(profile)
+                                }
                             }
                         }
                     }
                 }
             }
-        }
-        .listStyle(.sidebar)
-        .scrollContentBackground(.hidden)
-        .background(Color.clear)
-        .safeAreaInset(edge: .bottom) {
-            HStack(spacing: 12) {
-                Button { editingProfile = SSHProfile() } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                .help(preferences.text(.addSSHHost))
-
-                Button {
-                    let importedCount = profileStore.importOpenSSHConfig()
-                    importNotice = importedCount == 0 ? .noneFound : .imported(importedCount)
-                } label: {
-                    Image(systemName: "arrow.down.doc")
-                }
-                .buttonStyle(.borderless)
-                .help(preferences.text(.importSSHConfig))
-
-                Spacer()
-
-                Button { appState.openLocalSession() } label: {
-                    Image(systemName: "terminal")
-                }
-                .buttonStyle(.borderless)
-                .help(preferences.text(.newLocalTab))
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .listStyle(.sidebar)
+            .scrollContentBackground(.hidden)
             .background(Color.clear)
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 12) {
+                    Button { editingProfile = SSHProfile() } label: {
+                        Image(systemName: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(preferences.text(.addSSHHost))
+
+                    Button {
+                        let importedCount = profileStore.importOpenSSHConfig()
+                        importNotice = importedCount == 0 ? .noneFound : .imported(importedCount)
+                    } label: {
+                        Image(systemName: "arrow.down.doc")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(preferences.text(.importSSHConfig))
+
+                    Spacer()
+
+                    Button { appState.openLocalSession() } label: {
+                        Image(systemName: "terminal")
+                    }
+                    .buttonStyle(.borderless)
+                    .help(preferences.text(.newLocalTab))
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(Color.clear)
+            }
         }
         .navigationTitle(preferences.text(.application))
         .foregroundStyle(terminalAppearance.interfaceForeground)
@@ -905,7 +908,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section(preferences.text(.application)) {
-                LabeledContent(preferences.text(.version), value: "0.2.0")
+                LabeledContent(preferences.text(.version), value: "0.2.1")
                 Picker(preferences.text(.language), selection: $preferences.language) {
                     Text(preferences.text(.english)).tag(AppLanguage.english)
                     Text(preferences.text(.simplifiedChinese)).tag(AppLanguage.simplifiedChinese)
@@ -954,7 +957,6 @@ struct SettingsView: View {
                 SliderSetting(title: preferences.text(.fontSize), value: $terminalAppearance.fontSize, range: 10...28, step: 1, suffix: " pt")
                 SliderSetting(title: preferences.text(.lineSpacing), value: $terminalAppearance.lineSpacing, range: 0...12, step: 1, suffix: " pt")
                 SliderSetting(title: preferences.text(.backgroundOpacity), value: $terminalAppearance.backgroundOpacity, range: 0...1, step: 0.05, suffix: "%", displayMultiplier: 100)
-                SliderSetting(title: preferences.text(.backgroundBlur), value: $terminalAppearance.backgroundBlur, range: 0...24, step: 1, suffix: "")
                 Toggle(preferences.text(.blinkingCursor), isOn: $terminalAppearance.cursorBlinkEnabled)
                 Toggle(preferences.text(.metaKey), isOn: $preferences.metaKeyEnabled)
             }

@@ -68,67 +68,20 @@ struct TerminalBackdropView: NSViewRepresentable {
 }
 
 final class TerminalBackdropNSView: NSView {
-    private let visualEffectView = NSVisualEffectView()
-    private let colorView = NSView()
-
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.isOpaque = false
         layer?.borderWidth = 0
         layer?.borderColor = NSColor.clear.cgColor
-        colorView.wantsLayer = true
-        colorView.layer?.isOpaque = false
-        colorView.layer?.borderWidth = 0
-        visualEffectView.blendingMode = .behindWindow
-        visualEffectView.state = .inactive
-        visualEffectView.wantsLayer = true
-        visualEffectView.layer?.isOpaque = false
-        visualEffectView.layer?.borderWidth = 0
-        addSubview(visualEffectView)
-        addSubview(colorView, positioned: .above, relativeTo: visualEffectView)
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
-    override func layout() {
-        super.layout()
-        visualEffectView.frame = bounds
-        colorView.frame = bounds
-    }
-
     func update(appearance: TerminalAppearance) {
-        // Apply opacity to the theme color itself. This keeps every backdrop
-        // surface in the same color space instead of fading an opaque layer.
-        colorView.layer?.backgroundColor = appearance.effectiveBackgroundColor.cgColor
-        colorView.alphaValue = 1
-
-        if appearance.backgroundBlur <= 0.01 {
-            visualEffectView.state = .inactive
-            visualEffectView.alphaValue = 0
-        } else {
-            visualEffectView.state = .active
-            // AppKit exposes blur as native materials rather than a raw radius.
-            visualEffectView.material = material(for: appearance.backgroundBlur)
-            // The material already contains a tint. A restrained alpha keeps
-            // the desktop visible instead of stacking two opaque surfaces.
-            let blurFraction = min(max(appearance.backgroundBlur / 24, 0), 1)
-            visualEffectView.alphaValue = 0.08 + (blurFraction * 0.16)
-            visualEffectView.appearance = NSAppearance(
-                named: appearance.isDarkTheme ? .darkAqua : .aqua
-            )
-        }
-    }
-
-    private func material(for blur: Double) -> NSVisualEffectView.Material {
-        switch blur {
-        case 0..<6: return .underWindowBackground
-        case 6..<12: return .hudWindow
-        case 12..<18: return .popover
-        default: return .sidebar
-        }
+        layer?.backgroundColor = appearance.effectiveBackgroundColor.cgColor
     }
 }
 
@@ -902,7 +855,7 @@ private final class TerminalGridView: NSTextView {
 
         NSGraphicsContext.saveGraphicsState()
         // A default terminal cell is transparent. The themed backdrop behind
-        // this document owns the opacity and blur; painting Ghostty's default
+        // this document owns the opacity; painting Ghostty's default
         // background here would make the opacity slider appear ineffective.
         // Clear the dirty pixels first so an old opaque backing-store sample
         // cannot survive a scroll or an opacity change.

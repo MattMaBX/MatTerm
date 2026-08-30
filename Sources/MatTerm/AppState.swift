@@ -162,9 +162,6 @@ final class TerminalAppearance: ObservableObject {
     @Published var backgroundOpacity: Double {
         didSet { defaults.set(backgroundOpacity, forKey: Keys.backgroundOpacity) }
     }
-    @Published var backgroundBlur: Double {
-        didSet { defaults.set(backgroundBlur, forKey: Keys.backgroundBlur) }
-    }
     @Published var cursorBlinkEnabled: Bool {
         didSet { defaults.set(cursorBlinkEnabled, forKey: Keys.cursorBlinkEnabled) }
     }
@@ -185,7 +182,6 @@ final class TerminalAppearance: ObservableObject {
         static let lineSpacing = "terminal.lineSpacing"
         static let theme = "terminal.theme"
         static let backgroundOpacity = "terminal.backgroundOpacity"
-        static let backgroundBlur = "terminal.backgroundBlur"
         static let cursorBlinkEnabled = "terminal.cursorBlinkEnabled"
     }
 
@@ -204,14 +200,8 @@ final class TerminalAppearance: ObservableObject {
         theme = TerminalTheme.allCases.first { $0.id == savedThemeID }
             ?? TerminalTheme.allCases[0]
         let savedOpacity = defaults.object(forKey: Keys.backgroundOpacity) as? Double
-        let savedBlur = defaults.object(forKey: Keys.backgroundBlur) as? Double
-        // The original translucent defaults let the desktop and other windows
-        // bleed through the terminal, which also made every ANSI color look
-        // gray. Keep the controls, but start new/migrated profiles with a
-        // crisp terminal surface.
-        let isLegacyDefault = savedOpacity == 0.45 && savedBlur == 12
-        backgroundOpacity = min(max(isLegacyDefault ? 1 : (savedOpacity ?? 1), 0), 1)
-        backgroundBlur = min(max(isLegacyDefault ? 0 : (savedBlur ?? 0), 0), 24)
+        backgroundOpacity = min(max(savedOpacity ?? 1, 0), 1)
+        defaults.removeObject(forKey: "terminal.backgroundBlur")
         cursorBlinkEnabled = defaults.object(forKey: Keys.cursorBlinkEnabled) as? Bool ?? true
     }
 

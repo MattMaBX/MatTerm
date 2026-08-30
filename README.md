@@ -16,7 +16,7 @@
 
 MatTerm is a focused terminal for people who move between local shells and SSH hosts all day. It uses native SwiftUI and AppKit surfaces, a real PTY, the system OpenSSH client, and the Ghostty VT core to deliver a terminal that belongs on macOS without giving up the workflows expected from a modern terminal.
 
-**Current version:** v0.2.0
+**Current version:** v0.2.1
 
 ## Highlights
 
@@ -24,7 +24,7 @@ MatTerm is a focused terminal for people who move between local shells and SSH h
 - **A proper terminal surface.** ANSI, 256-color, and truecolor output; configurable scrollback; text selection and copy; and buffered native scrolling for long output.
 - **Multiplexer-aware input.** Mouse tracking, pane resizing, and wheel events remain available to tmux, Vim, and screen when they take ownership of the terminal.
 - **Tabs and directional splits.** Create left, right, above, or below panes with independent focus and cursor state.
-- **Comfortable daily use.** Built-in Tabby themes, font and line-spacing controls, cursor settings, opacity and blur, plus a persistent window layout.
+- **Comfortable daily use.** Built-in Tabby themes, font and line-spacing controls, cursor settings, background opacity, plus a persistent window layout.
 - **Built for macOS.** Full-screen support, standard keyboard shortcuts, universal `arm64` and `x86_64` builds, and English or Simplified Chinese UI.
 
 ## Get MatTerm
@@ -77,12 +77,11 @@ MatTerm uses `/usr/bin/ssh`; authentication continues to be handled by OpenSSH, 
 
 Review `~/.ssh/config` after editing a profile that shares a host block with advanced OpenSSH settings. That file remains the source of truth and can always be edited directly.
 
-## What's New in v0.2.0
+## What's New in v0.2.1
 
-- Improved ANSI background fills, text contrast, and line-spacing alignment.
-- Reworked ordinary-terminal scrollback for reliable long-output rendering and smoother movement.
-- Added an effective scrollback limit setting, native text selection and copy, and Cmd+Ctrl+F full-screen support.
-- Matched tmux trackpad scrolling more closely to ordinary terminal scrolling. Typing in an ordinary local or SSH shell returns the view to the live prompt.
+- The toolbar, sidebar, and empty workspace now follow the active terminal theme with readable interface contrast.
+- Simplified background customization to a single opacity control.
+- Settings can be dismissed with Escape or Cmd+W, and the tab strip stays hidden when no tabs are open.
 
 ## Current Scope
 

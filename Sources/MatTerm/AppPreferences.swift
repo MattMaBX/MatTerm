@@ -37,7 +37,6 @@ enum AppText {
     case fontSize
     case lineSpacing
     case backgroundOpacity
-    case backgroundBlur
     case blinkingCursor
     case metaKey
     case application
@@ -113,7 +112,6 @@ enum AppText {
             case .fontSize: return "Font size"
             case .lineSpacing: return "Line spacing"
             case .backgroundOpacity: return "Background opacity"
-            case .backgroundBlur: return "Background blur"
             case .blinkingCursor: return "Blinking cursor"
             case .metaKey: return "Use Option as Meta"
             case .application: return "MatTerm"
@@ -188,7 +186,6 @@ enum AppText {
             case .fontSize: return "字号"
             case .lineSpacing: return "行间距"
             case .backgroundOpacity: return "背景不透明度"
-            case .backgroundBlur: return "背景模糊"
             case .blinkingCursor: return "闪烁光标"
             case .metaKey: return "将 Option 键作为 Meta 键"
             case .application: return "MatTerm"
